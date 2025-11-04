@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="pt-BR" class="h-full">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Admin • Bots</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        darkMode: 'class',
+        theme: {
+          extend: {
+            colors: {
+              surface: '#111111',
+              surfaceLight: '#1a1a1a',
+              surfaceMuted: '#262626',
+              accent: '#38bdf8',
+            },
+            boxShadow: {
+              raised: '0 20px 25px -15px rgba(0,0,0,0.65)',
+            },
+          },
+        },
+      };
+    </script>
+    <link rel="stylesheet" href="./admin.css" />
+  </head>
+  <body class="bg-surface text-zinc-100 min-h-full font-sans">
+    <div id="app" class="min-h-screen pb-24">
+      <header class="sticky top-0 z-30 backdrop-blur bg-surface/90 border-b border-surfaceMuted">
+        <div class="mx-auto max-w-6xl px-6 py-4 flex items-center justify-between gap-4">
+          <div>
+            <h1 class="text-xl font-semibold tracking-wide">Admin • Bots</h1>
+            <p class="text-sm text-zinc-400" id="public-base-info"></p>
+          </div>
+          <div class="flex items-center gap-3">
+            <button id="admin-token-btn" class="btn-secondary" type="button">
+              🔐 Chave Admin
+            </button>
+            <button id="new-bot-btn" class="btn-primary" type="button">
+              ➕ Novo Bot
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <main class="mx-auto max-w-6xl px-6 py-6 space-y-6">
+        <section class="rounded-3xl bg-surfaceLight border border-surfaceMuted shadow-raised p-6 space-y-4">
+          <div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+            <div class="flex-1">
+              <label for="search-input" class="sr-only">Buscar bot</label>
+              <div class="relative">
+                <span class="pointer-events-none absolute inset-y-0 left-3 flex items-center text-zinc-500">🔎</span>
+                <input
+                  id="search-input"
+                  type="search"
+                  autocomplete="off"
+                  placeholder="Buscar por nome/slug…"
+                  class="w-full rounded-2xl bg-surface border border-surfaceMuted pl-10 pr-4 py-2 text-sm focus:border-accent focus:ring-2 focus:ring-accent/40 outline-none transition"
+                />
+              </div>
+            </div>
+            <div class="flex gap-3">
+              <button id="refresh-btn" class="btn-secondary" type="button">🔄 Atualizar</button>
+            </div>
+          </div>
+
+          <div class="overflow-hidden rounded-3xl border border-surfaceMuted">
+            <table class="min-w-full divide-y divide-surfaceMuted text-sm" aria-live="polite">
+              <thead class="bg-surface">
+                <tr>
+                  <th scope="col" class="table-head">Nome</th>
+                  <th scope="col" class="table-head">Slug</th>
+                  <th scope="col" class="table-head">Provider</th>
+                  <th scope="col" class="table-head">Sandbox</th>
+                  <th scope="col" class="table-head">Rate/min</th>
+                  <th scope="col" class="table-head">Flags</th>
+                </tr>
+              </thead>
+              <tbody id="bots-table-body" class="divide-y divide-surfaceMuted">
+                <!-- Conteúdo dinâmico -->
+              </tbody>
+            </table>
+            <div id="empty-state" class="hidden px-6 py-12 text-center text-sm text-zinc-400">
+              <p class="font-medium text-zinc-200">Nenhum bot encontrado.</p>
+              <p class="mt-2">Clique em “Novo Bot” para criar.</p>
+            </div>
+          </div>
+          <div id="error-hint" class="hidden rounded-2xl border border-amber-500/50 bg-amber-500/10 px-4 py-3 text-sm text-amber-200"></div>
+        </section>
+
+        <section id="instructions-card" class="hidden rounded-3xl border border-surfaceMuted bg-surfaceLight shadow-raised p-6 space-y-4">
+          <div class="flex items-start justify-between gap-4">
+            <div>
+              <h2 class="text-lg font-semibold">Webhook configurado</h2>
+              <p class="text-sm text-zinc-400">Use a URL abaixo para configurar o webhook do Telegram. O secret é definido no backend.</p>
+            </div>
+            <button id="close-instructions" type="button" class="text-zinc-500 hover:text-zinc-300" aria-label="Fechar instruções">✖️</button>
+          </div>
+          <div class="rounded-2xl border border-surfaceMuted bg-surface px-4 py-3 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <code id="webhook-url" class="text-sm break-all text-accent"></code>
+            <button id="copy-webhook" class="btn-secondary md:self-start" type="button">📋 Copiar URL</button>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="toast-container" class="fixed top-4 right-4 z-50 flex flex-col gap-3"></div>
+
+    <div id="modal-overlay" class="modal-overlay hidden" aria-hidden="true"></div>
+
+    <div id="token-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="token-modal-title">
+      <div class="modal-content">
+        <header class="modal-header">
+          <h2 id="token-modal-title" class="text-lg font-semibold">Chave Admin</h2>
+          <button class="modal-close" type="button" data-close-modal="token-modal" aria-label="Fechar">✖️</button>
+        </header>
+        <form id="token-form" class="space-y-4">
+          <div class="space-y-2">
+            <label for="token-input" class="text-sm font-medium">Admin API Token</label>
+            <div class="relative">
+              <input
+                id="token-input"
+                type="password"
+                autocomplete="off"
+                class="w-full rounded-2xl bg-surface border border-surfaceMuted px-4 py-2 text-sm focus:border-accent focus:ring-2 focus:ring-accent/40 outline-none transition"
+              />
+              <button type="button" id="toggle-token-visibility" class="absolute inset-y-0 right-3 flex items-center text-xs text-zinc-400 hover:text-zinc-200">
+                Mostrar
+              </button>
+            </div>
+            <p id="token-source" class="text-xs text-zinc-500"></p>
+          </div>
+          <div class="flex flex-col gap-3 sm:flex-row sm:justify-end">
+            <button type="button" id="clear-token" class="btn-secondary sm:flex-1">Limpar</button>
+            <button type="submit" class="btn-primary sm:flex-1">Salvar</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div id="bot-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="bot-modal-title">
+      <div class="modal-content max-w-2xl">
+        <header class="modal-header">
+          <h2 id="bot-modal-title" class="text-lg font-semibold">Novo Bot</h2>
+          <button class="modal-close" type="button" data-close-modal="bot-modal" aria-label="Fechar">✖️</button>
+        </header>
+        <form id="bot-form" class="space-y-5">
+          <div class="grid gap-4 md:grid-cols-2">
+            <div class="form-field">
+              <label for="bot-name" class="form-label">Nome<span class="text-rose-400">*</span></label>
+              <input id="bot-name" name="name" type="text" required minlength="2" maxlength="64" class="form-input" />
+              <p class="form-hint hidden" data-error-for="name"></p>
+            </div>
+            <div class="form-field">
+              <label for="bot-slug" class="form-label">Slug<span class="text-rose-400">*</span></label>
+              <input
+                id="bot-slug"
+                name="slug"
+                type="text"
+                required
+                pattern="^[a-z0-9][a-z0-9-_]{1,31}$"
+                class="form-input"
+              />
+              <p class="text-xs text-zinc-500">minúsculas, números, hífen/underscore</p>
+              <p class="form-hint hidden" data-error-for="slug"></p>
+            </div>
+            <div class="form-field">
+              <label for="bot-provider" class="form-label">Provider</label>
+              <select id="bot-provider" name="provider" class="form-input">
+                <option value="pushinpay">pushinpay</option>
+                <option value="syncpay">syncpay</option>
+                <option value="manual">manual</option>
+              </select>
+              <p class="form-hint hidden" data-error-for="provider"></p>
+            </div>
+            <div class="form-field">
+              <label for="bot-sandbox" class="form-label">Sandbox</label>
+              <select id="bot-sandbox" name="sandbox" class="form-input">
+                <option value="false" selected>false</option>
+                <option value="true">true</option>
+              </select>
+              <p class="form-hint hidden" data-error-for="sandbox"></p>
+            </div>
+            <div class="form-field">
+              <label for="bot-rate" class="form-label">Rate por minuto</label>
+              <input id="bot-rate" name="rate_per_min" type="number" min="1" value="60" class="form-input" />
+              <p class="text-xs text-zinc-500">limite global por bot</p>
+              <p class="form-hint hidden" data-error-for="rate_per_min"></p>
+            </div>
+            <div class="form-field">
+              <label for="bot-renderer" class="form-label">Renderer</label>
+              <select id="bot-renderer" name="renderer" class="form-input">
+                <option value="markdownV2" selected>markdownV2</option>
+                <option value="html">html</option>
+                <option value="plain">plain</option>
+              </select>
+              <p class="form-hint hidden" data-error-for="renderer"></p>
+            </div>
+            <div class="form-field md:col-span-2">
+              <label class="form-label inline-flex items-center gap-2">
+                <input id="bot-album" name="use_album" type="checkbox" class="form-checkbox" checked />
+                Use álbum (mídia)
+              </label>
+              <p class="form-hint hidden" data-error-for="use_album"></p>
+            </div>
+            <div class="form-field">
+              <label for="bot-typing-delay" class="form-label">Typing delay (ms)</label>
+              <input id="bot-typing-delay" name="typing_delay_ms" type="number" min="0" max="5000" value="400" class="form-input" />
+              <p class="form-hint hidden" data-error-for="typing_delay_ms"></p>
+            </div>
+            <div class="form-field">
+              <label for="bot-watermark" class="form-label">Watermark (opcional)</label>
+              <input id="bot-watermark" name="watermark" type="text" maxlength="64" class="form-input" />
+              <p class="form-hint hidden" data-error-for="watermark"></p>
+            </div>
+          </div>
+          <div class="flex flex-col gap-3 sm:flex-row sm:justify-end">
+            <button type="button" class="btn-secondary sm:flex-1" data-close-modal="bot-modal">Fechar</button>
+            <button type="submit" id="create-bot-btn" class="btn-primary sm:flex-1">Criar Bot</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <script src="./admin.js" defer></script>
+  </body>
+</html>
