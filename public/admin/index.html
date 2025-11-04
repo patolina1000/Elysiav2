@@ -175,18 +175,22 @@
               <p class="form-hint hidden" data-error-for="provider"></p>
             </div>
             <div class="form-field">
-              <label for="bot-rate" class="form-label">Rate por minuto</label>
-              <input
-                id="bot-rate"
-                name="rate_per_minute"
-                type="number"
-                min="1"
-                value="60"
-                class="form-input"
-                readonly
-                disabled
-              />
-              <p class="text-xs text-zinc-500">60 rpm (fixo)</p>
+              <label for="bot-token" class="form-label">Token do bot</label>
+              <div class="flex items-center gap-2">
+                <input
+                  id="bot-token"
+                  name="token"
+                  type="password"
+                  placeholder="123456:ABC-DEF..."
+                  autocomplete="off"
+                  class="form-input flex-1"
+                />
+                <button id="btn-validate-token" type="button" class="btn-secondary whitespace-nowrap">
+                  Validar
+                </button>
+              </div>
+              <p class="text-xs text-zinc-500">Nunca compartilhe o token. Ele será usado apenas para autenticar o bot.</p>
+              <p id="token-status" class="text-xs text-zinc-400"></p>
             </div>
             <div class="form-field md:col-span-2">
               <label class="form-label inline-flex items-center gap-2">
@@ -196,7 +200,7 @@
               <p class="form-hint hidden" data-error-for="use_album"></p>
             </div>
           </div>
-          <p class="text-xs text-zinc-500">Padrões: 60 rpm, MarkdownV2, delay 0, sem watermark, produção.</p>
+          <p class="text-xs text-zinc-500">Padrões: MarkdownV2, delay 0, sem watermark, produção.</p>
           <div class="flex flex-col gap-3 sm:flex-row sm:justify-end">
             <button type="button" class="btn-secondary sm:flex-1" data-close-modal="bot-modal">Fechar</button>
             <button type="submit" id="create-bot-btn" class="btn-primary sm:flex-1">Criar Bot</button>

@@ -26,6 +26,9 @@
     clearTokenBtn: document.querySelector('#clear-token'),
     botForm: document.querySelector('#bot-form'),
     createBotBtn: document.querySelector('#create-bot-btn'),
+    validateTokenBtn: document.querySelector('#btn-validate-token'),
+    botTokenInput: document.querySelector('#bot-token'),
+    tokenStatus: document.querySelector('#token-status'),
     toastContainer: document.querySelector('#toast-container'),
     publicBaseInfo: document.querySelector('#public-base-info'),
     instructionsCard: document.querySelector('#instructions-card'),
@@ -49,8 +52,9 @@
     abortController: null,
   };
 
+  const INTERNAL_RATE_PER_MINUTE = 60;
+
   const BOT_DEFAULTS = Object.freeze({
-    rate_per_minute: 60,
     sandbox: false,
     renderer: 'markdownV2',
     typing_delay_ms: 0,
@@ -155,7 +159,7 @@
           ? bot.rate_per_minute
           : typeof bot.rate_per_min === 'number'
           ? bot.rate_per_min
-          : BOT_DEFAULTS.rate_per_minute;
+          : INTERNAL_RATE_PER_MINUTE;
       const cells = [
         bot.name || '—',
         bot.slug || '—',
@@ -316,11 +320,13 @@
     if (id === 'bot-modal') {
       elements.botForm.reset();
       document.querySelector('#bot-provider').value = 'pushinpay';
-      const rateInput = document.querySelector('#bot-rate');
-      if (rateInput) {
-        rateInput.value = String(BOT_DEFAULTS.rate_per_minute);
-      }
       document.querySelector('#bot-album').checked = true;
+      if (elements.botTokenInput) {
+        elements.botTokenInput.value = '';
+      }
+      if (elements.tokenStatus) {
+        elements.tokenStatus.textContent = '';
+      }
       clearFieldErrors();
       setTimeout(() => {
         const firstInput = modal.querySelector('input, select, textarea, button:not([type="button"])');
@@ -466,13 +472,63 @@
 
   function serializeBotForm() {
     const formData = new FormData(elements.botForm);
-    return {
+    const payload = {
       name: (formData.get('name') || '').toString().trim(),
       slug: (formData.get('slug') || '').toString().trim(),
       provider: (formData.get('provider') || '').toString().trim(),
       use_album: formData.get('use_album') === 'on',
       ...BOT_DEFAULTS,
     };
+    const token = (formData.get('token') || '').toString().trim();
+    if (token) {
+      payload.token = token;
+    }
+    return payload;
+  }
+
+  async function handleValidateTokenClick() {
+    if (!elements.validateTokenBtn || !elements.botTokenInput || !elements.tokenStatus) {
+      return;
+    }
+
+    const token = elements.botTokenInput.value.trim();
+    if (!token) {
+      elements.tokenStatus.textContent = 'Informe o token para validar.';
+      return;
+    }
+
+    const previousLabel = elements.validateTokenBtn.textContent;
+    elements.validateTokenBtn.disabled = true;
+    elements.validateTokenBtn.textContent = 'Validando…';
+    elements.tokenStatus.textContent = '';
+
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 6000);
+      const response = await fetch(`${baseUrl}/api/telegram/validate-token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+
+      const data = await response.json().catch(() => ({}));
+      if (response.ok && data && data.ok) {
+        const info = data.result || {};
+        const username = info.username ? `@${info.username}` : '@sem_username';
+        const id = info.id || 'desconhecido';
+        elements.tokenStatus.textContent = `✅ Válido: ${username} (id ${id})`;
+      } else {
+        const reason = (data && (data.error || data.description)) || 'TOKEN_INVALID';
+        elements.tokenStatus.textContent = `❌ Inválido: ${reason}`;
+      }
+    } catch (error) {
+      elements.tokenStatus.textContent = '❌ Erro de rede/timeout na validação.';
+    } finally {
+      elements.validateTokenBtn.disabled = false;
+      elements.validateTokenBtn.textContent = previousLabel;
+    }
   }
 
   async function handleBotSubmit(event) {
@@ -650,6 +706,9 @@
     elements.clearTokenBtn.addEventListener('click', handleTokenClear);
     elements.toggleTokenVisibility.addEventListener('click', toggleTokenVisibility);
     elements.botForm.addEventListener('submit', handleBotSubmit);
+    if (elements.validateTokenBtn) {
+      elements.validateTokenBtn.addEventListener('click', handleValidateTokenClick);
+    }
     elements.modalOverlay.addEventListener('click', handleOverlayClick);
     document.querySelectorAll('[data-close-modal]').forEach((btn) => {
       btn.addEventListener('click', () => closeModal(btn.getAttribute('data-close-modal')));
