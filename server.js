@@ -1,7 +1,10 @@
 const express = require('express');
 const path = require('path');
 const { Pool } = require('pg');
+const crypto = require('crypto');
 const requireAdmin = require('./middleware/requireAdmin');
+const requireTgSecret = require('./middleware/requireTgSecret');
+const { createQueue } = require('./lib/inMemoryQueue');
 
 // --- Postgres minimal ---
 let pgPool = null;
@@ -86,7 +89,6 @@ COMMIT;`;
 }
 
 // --- ADMIN API: storage & helpers ---
-const crypto = require('crypto');
 
 const mem = {
   bots: new Map(), // key = slug, value = bot object
@@ -152,6 +154,45 @@ app.use(express.json());
 // Migração segura no boot (rápida e idempotente)
 ensureBotsTable().catch(err => {
   console.error('[DB][MIGRATION][BOTS] erro', err?.message);
+});
+
+// gerador simples de request_id
+function rid() {
+  return crypto.randomUUID ? crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2,8)}`;
+}
+
+// worker assíncrono (por enquanto só loga)
+const webhookQueue = createQueue(async (job) => {
+  const t0 = Date.now();
+  // Simular parsing/roteamento leve
+  const { slug, update, request_id, received_at } = job;
+  const chatId = update?.message?.chat?.id || update?.callback_query?.message?.chat?.id || null;
+  const kind = update?.message ? 'message' : update?.callback_query ? 'callback_query' : 'other';
+
+  // Aqui no futuro: publicar Outbox, gravar st:/co: etc.
+  console.info('[WEBHOOK:PROCESS]', { request_id, slug, kind, chatId, age_ms: Date.now() - received_at });
+
+  // trabalho "rápido"
+  await Promise.resolve();
+
+  console.info('[WEBHOOK:DONE]', { request_id, slug, took_ms: Date.now() - t0 });
+}, { name: 'webhook' });
+
+// rota do webhook — ACK imediato
+app.post('/tg/:slug/webhook', requireTgSecret, (req, res) => {
+  const request_id = rid();
+  const received_at = Date.now();
+  const slug = (req.params.slug || '').trim();
+  const update = req.body || {};
+
+  // Logs mínimos (sem conteúdo sensível)
+  console.info('[WEBHOOK:ACK]', { request_id, slug, has_update: !!update && Object.keys(update).length > 0 });
+
+  // Enfileira para processamento assíncrono
+  webhookQueue.push({ request_id, received_at, slug, update });
+
+  // ACK IMEDIATO
+  res.status(200).json({ ok: true });
 });
 
 // Lista bots (protegido por token Admin)
