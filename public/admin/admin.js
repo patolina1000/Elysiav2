@@ -54,12 +54,13 @@
 
   const INTERNAL_RATE_PER_MINUTE = 60;
 
-  const BOT_DEFAULTS = Object.freeze({
+  const BOT_DEFAULTS = {
+    rate_per_minute: 60,
     sandbox: false,
-    renderer: 'markdownV2',
+    renderer: 'MarkdownV2',
     typing_delay_ms: 0,
     watermark: null,
-  });
+  };
 
   function safeGetLocalToken() {
     try {
