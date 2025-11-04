@@ -91,26 +91,32 @@ async function run() {
         const { start, end } = monthBounds(d);
         const key = ymKey(d);
         await client.query(`
-          DO $$
+          DO $part$
           BEGIN
             IF NOT EXISTS (
               SELECT 1 FROM pg_class c
               JOIN pg_namespace n ON n.oid = c.relnamespace
               WHERE n.nspname='public' AND c.relname='funnel_events_${key}'
             ) THEN
-              EXECUTE format($$
-                CREATE TABLE public.funnel_events_%I
-                PARTITION OF public.funnel_events_new
-                FOR VALUES FROM (%L) TO (%L)
-              $$, '${key}', '${start}', '${end}');
-              EXECUTE format('CREATE UNIQUE INDEX IF NOT EXISTS ux_fe_event_id_%I ON public.funnel_events_%I (event_id)', '${key}', '${key}');
+              EXECUTE format(
+                'CREATE TABLE public.funnel_events_%I
+                 PARTITION OF public.funnel_events_new
+                 FOR VALUES FROM (%L) TO (%L)',
+                '${key}', '${start}', '${end}'
+              );
+              -- índice UNIQUE local por partição
+              EXECUTE format(
+                'CREATE UNIQUE INDEX IF NOT EXISTS ux_fe_event_id_%I
+                 ON public.funnel_events_%I (event_id)',
+                '${key}', '${key}'
+              );
             END IF;
-          END $$;
+          END $part$;
         `);
       }
 
       await client.query(`
-        DO $$
+        DO $part$
         BEGIN
           IF NOT EXISTS (
             SELECT 1 FROM pg_class c
@@ -119,9 +125,10 @@ async function run() {
           ) THEN
             EXECUTE 'CREATE TABLE public.funnel_events_default
                      PARTITION OF public.funnel_events_new DEFAULT';
-            EXECUTE 'CREATE UNIQUE INDEX IF NOT EXISTS ux_fe_event_id_default ON public.funnel_events_default (event_id)';
+            EXECUTE 'CREATE UNIQUE INDEX IF NOT EXISTS ux_fe_event_id_default
+                     ON public.funnel_events_default (event_id)';
           END IF;
-        END $$;
+        END $part$;
       `);
 
       const { rows: existsOld } = await client.query(`
@@ -165,25 +172,31 @@ async function run() {
         const { start, end } = monthBounds(d);
         const key = ymKey(d);
         await client.query(`
-          DO $$
+          DO $part$
           BEGIN
             IF NOT EXISTS (
               SELECT 1 FROM pg_class c
               JOIN pg_namespace n ON n.oid = c.relnamespace
               WHERE n.nspname='public' AND c.relname='funnel_events_${key}'
             ) THEN
-              EXECUTE format($$
-                CREATE TABLE public.funnel_events_%I
-                PARTITION OF public.funnel_events
-                FOR VALUES FROM (%L) TO (%L)
-              $$, '${key}', '${start}', '${end}');
-              EXECUTE format('CREATE UNIQUE INDEX IF NOT EXISTS ux_fe_event_id_%I ON public.funnel_events_%I (event_id)', '${key}', '${key}');
+              EXECUTE format(
+                'CREATE TABLE public.funnel_events_%I
+                 PARTITION OF public.funnel_events
+                 FOR VALUES FROM (%L) TO (%L)',
+                '${key}', '${start}', '${end}'
+              );
+              -- índice UNIQUE local por partição
+              EXECUTE format(
+                'CREATE UNIQUE INDEX IF NOT EXISTS ux_fe_event_id_%I
+                 ON public.funnel_events_%I (event_id)',
+                '${key}', '${key}'
+              );
             END IF;
-          END $$;
+          END $part$;
         `);
       }
       await client.query(`
-        DO $$
+        DO $part$
         BEGIN
           IF NOT EXISTS (
             SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
@@ -191,9 +204,10 @@ async function run() {
           ) THEN
             EXECUTE 'CREATE TABLE public.funnel_events_default
                      PARTITION OF public.funnel_events DEFAULT';
-            EXECUTE 'CREATE UNIQUE INDEX IF NOT EXISTS ux_fe_event_id_default ON public.funnel_events_default (event_id)';
+            EXECUTE 'CREATE UNIQUE INDEX IF NOT EXISTS ux_fe_event_id_default
+                     ON public.funnel_events_default (event_id)';
           END IF;
-        END $$;
+        END $part$;
       `);
     }
 
