@@ -73,7 +73,7 @@ app.get('/api/admin/bots', (req, res) => {
     created_at: b.created_at,
   }));
   console.info('[ADMIN_BOTS][LIST]', { request_id, count: list.length });
-  res.json({ ok: true, bots: list });
+  res.json(list);
 });
 
 // Cria bot (sem auth por enquanto) + defaults imutáveis
@@ -127,7 +127,12 @@ app.post('/api/admin/bots', express.json(), (req, res) => {
 
   // nunca retornar token
   const { token: _omit, ...safe } = bot;
-  res.status(201).json({ ok: true, bot: { ...safe, has_token: !!bot.token } });
+  res.status(201).json({
+    ok: true,
+    slug: bot.slug,
+    webhook_url: bot.webhook_url,
+    bot: { ...safe, has_token: !!bot.token }
+  });
 });
 
 app.post('/api/telegram/validate-token', async (req, res) => {
