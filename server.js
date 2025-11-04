@@ -5,6 +5,8 @@ const crypto = require('crypto');
 const requireAdmin = require('./middleware/requireAdmin');
 const requireTgSecret = require('./middleware/requireTgSecret');
 const { createQueue } = require('./lib/inMemoryQueue');
+const { insertStartEvent } = require('./lib/funnel');
+const { recordStartLatency } = require('./lib/metrics');
 
 // --- Postgres minimal ---
 let pgPool = null;
@@ -167,7 +169,7 @@ function rid() {
 const webhookQueue = createQueue(async (job) => {
   const t0 = Date.now();
   // Simular parsing/roteamento leve
-  const { slug, update, request_id, received_at } = job;
+  const { slug, update, request_id, received_at, t_ack } = job;
   const chatId = update?.message?.chat?.id || update?.callback_query?.message?.chat?.id || null;
   const kind = update?.message ? 'message' : update?.callback_query ? 'callback_query' : 'other';
 
@@ -176,6 +178,48 @@ const webhookQueue = createQueue(async (job) => {
 
   // trabalho "rápido"
   await Promise.resolve();
+
+  try {
+    const msg = update && update.message;
+    const text = (msg && typeof msg.text === 'string') ? msg.text.trim() : '';
+    const messageChatId = msg && msg.chat && msg.chat.id ? String(msg.chat.id) : null;
+    let latencyRecorded = false;
+
+    const ensureStartLatency = () => {
+      if (latencyRecorded || !t_ack) return;
+      try {
+        recordStartLatency(slug, Date.now() - t_ack);
+        latencyRecorded = true;
+      } catch (err) {
+        console.error('[METRIC][START][ERR]', err?.message || err);
+      }
+    };
+
+    if (!pgPool) {
+      try {
+        await getPgPool();
+      } catch (err) {
+        console.error('[WEBHOOK][PROCESS][PG][ERR]', err?.message || err);
+      }
+    }
+
+    // 1) Detecta /start e grava st: direto na partição
+    if (messageChatId && (text === '/start' || text.toLowerCase() === 'start' || text.startsWith('/start '))) {
+      try {
+        await insertStartEvent(pgPool, { slug, tg_id: messageChatId, occurredAt: new Date() });
+      } catch (e) {
+        console.error('[FUNNEL][START][ERR]', { slug, chatId: messageChatId, err: e?.message });
+      }
+    }
+
+    // 2) (Se existir 1º envio real, posicione a métrica logo após o sendMessage)
+    //    Exemplo: ensureStartLatency(); após o envio real
+
+    // 3) Fallback: se não houver envio implementado ainda, mede antes do DONE
+    ensureStartLatency();
+  } catch (err) {
+    console.error('[WEBHOOK][PROCESS][ERR]', err?.message || err);
+  }
 
   console.info('[WEBHOOK:DONE]', { request_id, slug, took_ms: Date.now() - t0 });
 }, { name: 'webhook' });
@@ -191,7 +235,8 @@ app.post('/tg/:slug/webhook', requireTgSecret, (req, res) => {
   console.info('[WEBHOOK:ACK]', { request_id, slug, has_update: !!update && Object.keys(update).length > 0 });
 
   // Enfileira para processamento assíncrono
-  webhookQueue.push({ request_id, received_at, slug, update });
+  const t_ack = Date.now();
+  webhookQueue.push({ request_id, received_at, slug, update, t_ack });
 
   // ACK IMEDIATO
   res.status(200).json({ ok: true });
