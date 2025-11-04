@@ -1,17 +1,19 @@
 /* eslint-disable no-console */
 const { Client } = require('pg');
 
-function ymKey(d) {
+function ymKeySafe(d) {
   const y = d.getUTCFullYear();
-  const m = d.getUTCMonth() + 1;
-  return `${y}-${String(m).padStart(2, '0')}`;
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  return `${y}_${m}`;
 }
 function monthBounds(d) {
   const y = d.getUTCFullYear();
   const m = d.getUTCMonth();
   const start = new Date(Date.UTC(y, m, 1));
   const end = new Date(Date.UTC(y, m + 1, 1));
-  return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
+  const s = start.toISOString().slice(0, 10);
+  const e = end.toISOString().slice(0, 10);
+  return { start: s, end: e };
 }
 
 async function run() {
@@ -89,30 +91,40 @@ async function run() {
 
       for (const d of months) {
         const { start, end } = monthBounds(d);
-        const key = ymKey(d);
-        await client.query(`
+        const key = ymKeySafe(d);
+        const partitionName = `funnel_events_${key}`;
+        const indexName = `ux_fe_event_id_${key}`;
+        let createPartitionSql = `
           DO $part$
           BEGIN
             IF NOT EXISTS (
               SELECT 1 FROM pg_class c
               JOIN pg_namespace n ON n.oid = c.relnamespace
-              WHERE n.nspname='public' AND c.relname='funnel_events_${key}'
+              WHERE n.nspname='public' AND c.relname='${partitionName}'
             ) THEN
               EXECUTE format(
-                'CREATE TABLE public.funnel_events_%I
-                 PARTITION OF public.funnel_events_new
-                 FOR VALUES FROM (%L) TO (%L)',
-                '${key}', '${start}', '${end}'
+                'CREATE TABLE public.%I PARTITION OF public.funnel_events_new
+                 FOR VALUES FROM (DATE %L) TO (DATE %L)',
+                %L, %L, %L
               );
-              -- índice UNIQUE local por partição
+              -- índice UNIQUE local por partição (em event_id)
               EXECUTE format(
-                'CREATE UNIQUE INDEX IF NOT EXISTS ux_fe_event_id_%I
-                 ON public.funnel_events_%I (event_id)',
-                '${key}', '${key}'
+                'CREATE UNIQUE INDEX IF NOT EXISTS %I ON public.%I (event_id)',
+                %L, %L
               );
             END IF;
           END $part$;
-        `);
+        `;
+        for (const value of [
+          "'" + partitionName + "'",
+          "'" + start + "'",
+          "'" + end + "'",
+          "'" + indexName + "'",
+          "'" + partitionName + "'",
+        ]) {
+          createPartitionSql = createPartitionSql.replace('%L', value);
+        }
+        await client.query(createPartitionSql);
       }
 
       await client.query(`
@@ -170,30 +182,40 @@ async function run() {
       ];
       for (const d of months) {
         const { start, end } = monthBounds(d);
-        const key = ymKey(d);
-        await client.query(`
+        const key = ymKeySafe(d);
+        const partitionName = `funnel_events_${key}`;
+        const indexName = `ux_fe_event_id_${key}`;
+        let ensurePartitionSql = `
           DO $part$
           BEGIN
             IF NOT EXISTS (
               SELECT 1 FROM pg_class c
               JOIN pg_namespace n ON n.oid = c.relnamespace
-              WHERE n.nspname='public' AND c.relname='funnel_events_${key}'
+              WHERE n.nspname='public' AND c.relname='${partitionName}'
             ) THEN
               EXECUTE format(
-                'CREATE TABLE public.funnel_events_%I
-                 PARTITION OF public.funnel_events
-                 FOR VALUES FROM (%L) TO (%L)',
-                '${key}', '${start}', '${end}'
+                'CREATE TABLE public.%I PARTITION OF public.funnel_events
+                 FOR VALUES FROM (DATE %L) TO (DATE %L)',
+                %L, %L, %L
               );
-              -- índice UNIQUE local por partição
+              -- índice UNIQUE local por partição (em event_id)
               EXECUTE format(
-                'CREATE UNIQUE INDEX IF NOT EXISTS ux_fe_event_id_%I
-                 ON public.funnel_events_%I (event_id)',
-                '${key}', '${key}'
+                'CREATE UNIQUE INDEX IF NOT EXISTS %I ON public.%I (event_id)',
+                %L, %L
               );
             END IF;
           END $part$;
-        `);
+        `;
+        for (const value of [
+          "'" + partitionName + "'",
+          "'" + start + "'",
+          "'" + end + "'",
+          "'" + indexName + "'",
+          "'" + partitionName + "'",
+        ]) {
+          ensurePartitionSql = ensurePartitionSql.replace('%L', value);
+        }
+        await client.query(ensurePartitionSql);
       }
       await client.query(`
         DO $part$
