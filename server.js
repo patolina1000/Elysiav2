@@ -1,6 +1,7 @@
 const express = require('express');
 const path = require('path');
 const { Pool } = require('pg');
+const requireAdmin = require('./middleware/requireAdmin');
 
 // --- Postgres minimal ---
 let pgPool = null;
@@ -153,8 +154,8 @@ ensureBotsTable().catch(err => {
   console.error('[DB][MIGRATION][BOTS] erro', err?.message);
 });
 
-// Lista bots (sem auth por enquanto)
-app.get('/api/admin/bots', async (req, res) => {
+// Lista bots (protegido por token Admin)
+app.get('/api/admin/bots', requireAdmin, async (req, res) => {
   const request_id = genReqId();
   const publicBase = getPublicBaseUrl(req);
   const pool = await getPgPool();
@@ -216,8 +217,8 @@ app.get('/api/admin/bots', async (req, res) => {
   }
 });
 
-// Cria bot (sem auth por enquanto) + defaults imutáveis
-app.post('/api/admin/bots', express.json(), async (req, res) => {
+// Cria bot (protegido por token Admin) + defaults imutáveis
+app.post('/api/admin/bots', requireAdmin, express.json(), async (req, res) => {
   const request_id = genReqId();
   const { errors, name, slug, provider, use_album, token } = validateBotPayload(req.body || {});
   if (errors.length) {
