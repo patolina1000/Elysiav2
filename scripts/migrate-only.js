@@ -22,19 +22,36 @@ async function run() {
     await client.query(`
       CREATE TABLE IF NOT EXISTS public.bots (
         id BIGSERIAL PRIMARY KEY,
-        name TEXT NOT NULL,
-        slug TEXT NOT NULL,
-        provider TEXT NOT NULL,
-        use_album BOOLEAN NOT NULL DEFAULT false,
-        token TEXT NULL,
-        token_encrypted BYTEA NULL,
+        name TEXT,
+        slug TEXT,
+        provider TEXT,
+        use_album BOOLEAN,
+        token TEXT,
+        token_encrypted BYTEA,
         rate_per_minute INTEGER NOT NULL DEFAULT 60,
         sandbox BOOLEAN NOT NULL DEFAULT false,
         renderer TEXT NOT NULL DEFAULT 'MarkdownV2',
         typing_delay_ms INTEGER NOT NULL DEFAULT 0,
-        watermark TEXT NULL,
+        watermark TEXT,
         created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-      )
+      );
+    `);
+
+    // Garante colunas em esquemas legados (idempotente) — evita quebra em ALTERs posteriores
+    await client.query(`
+      ALTER TABLE public.bots
+        ADD COLUMN IF NOT EXISTS name              TEXT,
+        ADD COLUMN IF NOT EXISTS slug              TEXT,
+        ADD COLUMN IF NOT EXISTS provider          TEXT,
+        ADD COLUMN IF NOT EXISTS use_album         BOOLEAN,
+        ADD COLUMN IF NOT EXISTS token             TEXT,
+        ADD COLUMN IF NOT EXISTS token_encrypted   BYTEA,
+        ADD COLUMN IF NOT EXISTS rate_per_minute   INTEGER,
+        ADD COLUMN IF NOT EXISTS sandbox           BOOLEAN,
+        ADD COLUMN IF NOT EXISTS renderer          TEXT,
+        ADD COLUMN IF NOT EXISTS typing_delay_ms   INTEGER,
+        ADD COLUMN IF NOT EXISTS watermark         TEXT,
+        ADD COLUMN IF NOT EXISTS created_at        TIMESTAMPTZ;
     `);
 
     // UNIQUE slug na mãe (idempotente)
@@ -77,10 +94,12 @@ async function run() {
     await client.query(`ALTER TABLE public.bots ALTER COLUMN typing_delay_ms SET DEFAULT 0`);
 
     // Atualizações condicionais (idempotente)
-    await client.query(`UPDATE public.bots SET rate_per_minute=60 WHERE rate_per_minute IS DISTINCT FROM 60`);
-    await client.query(`UPDATE public.bots SET sandbox=false WHERE sandbox IS DISTINCT FROM false`);
-    await client.query(`UPDATE public.bots SET renderer='MarkdownV2' WHERE renderer IS DISTINCT FROM 'MarkdownV2'`);
-    await client.query(`UPDATE public.bots SET typing_delay_ms=0 WHERE typing_delay_ms IS DISTINCT FROM 0`);
+    // Backfill seguro para registros legados
+    await client.query(`UPDATE public.bots SET rate_per_minute = 60     WHERE rate_per_minute IS NULL`);
+    await client.query(`UPDATE public.bots SET sandbox = false          WHERE sandbox IS NULL`);
+    await client.query(`UPDATE public.bots SET renderer = 'MarkdownV2'  WHERE renderer IS NULL`);
+    await client.query(`UPDATE public.bots SET typing_delay_ms = 0      WHERE typing_delay_ms IS NULL`);
+    await client.query(`UPDATE public.bots SET created_at = now()       WHERE created_at IS NULL`);
 
     await client.query('COMMIT');
     console.log('[MIGRATE] done in', Date.now() - t0, 'ms');
