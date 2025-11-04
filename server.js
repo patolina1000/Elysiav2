@@ -2,7 +2,7 @@ const express = require('express');
 const path = require('path');
 
 const app = express();
-const port = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3000;
 const publicDirectory = path.join(__dirname, 'public');
 
 app.use(express.static(publicDirectory, {
@@ -33,10 +33,20 @@ app.use((req, res, next) => {
   }
 });
 
+// ---- Health check para o Render (retorna 200 OK) ----
+// Mantém resposta em texto simples para ser leve e previsível.
+// Adicionar ANTES do app.listen(...)
+app.get('/healthz', (_req, res) => {
+  res.status(200).type('text/plain').send('ok');
+});
+// Alguns provedores usam HEAD no healthcheck; garanta 200 também:
+app.head('/healthz', (_req, res) => res.sendStatus(200));
+
 app.use((req, res) => {
   res.status(404).send('Not Found');
 });
 
-app.listen(port, () => {
-  console.log(`Servidor ouvindo na porta ${port}`);
+const HOST = '0.0.0.0';
+app.listen(PORT, HOST, () => {
+  console.log(`Servidor ouvindo na porta ${PORT}`);
 });
