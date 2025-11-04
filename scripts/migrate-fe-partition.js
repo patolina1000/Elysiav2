@@ -1,0 +1,206 @@
+/* eslint-disable no-console */
+const { Client } = require('pg');
+
+function ymKey(d) {
+  const y = d.getUTCFullYear();
+  const m = d.getUTCMonth() + 1;
+  return `${y}-${String(m).padStart(2, '0')}`;
+}
+function monthBounds(d) {
+  const y = d.getUTCFullYear();
+  const m = d.getUTCMonth();
+  const start = new Date(Date.UTC(y, m, 1));
+  const end = new Date(Date.UTC(y, m + 1, 1));
+  return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
+}
+
+async function run() {
+  const cn = process.env.DATABASE_URL;
+  if (!cn) {
+    console.error('[PART] DATABASE_URL não definido');
+    process.exit(2);
+  }
+
+  const client = new Client({ connectionString: cn, ssl: { rejectUnauthorized: false } });
+  await client.connect();
+
+  try {
+    console.log('[PART] start');
+    await client.query('BEGIN');
+    await client.query("SET LOCAL lock_timeout = '5s'");
+    await client.query("SET LOCAL statement_timeout = '300s'");
+
+    const { rows: partRows } = await client.query(`
+      SELECT 1 FROM pg_partitioned_table pt
+      JOIN pg_class c ON c.oid = pt.partrelid
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname='public' AND c.relname='funnel_events'
+      LIMIT 1;
+    `);
+    const isPartitioned = partRows.length > 0;
+
+    if (!isPartitioned) {
+      console.log('[PART] funnel_events não é particionada: criando tabela nova + migrando');
+
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS public.funnel_events_new (
+          id BIGSERIAL PRIMARY KEY,
+          bot_id BIGINT NULL,
+          bot_slug TEXT NULL,
+          event_name TEXT NOT NULL,
+          event_id TEXT NOT NULL,
+          tg_id BIGINT NULL,
+          transaction_id TEXT NULL,
+          payload_id TEXT NULL,
+          price_cents INTEGER NULL,
+          meta JSONB NULL,
+          occurred_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        ) PARTITION BY RANGE (occurred_at);
+      `);
+
+      await client.query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname='ix_funnel_events_bot_time') THEN
+            EXECUTE 'CREATE INDEX ix_funnel_events_bot_time ON public.funnel_events_new (bot_id, occurred_at DESC)';
+          END IF;
+          IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname='ix_funnel_events_bot_tg') THEN
+            EXECUTE 'CREATE INDEX ix_funnel_events_bot_tg ON public.funnel_events_new (bot_id, tg_id)';
+          END IF;
+        END $$;
+      `);
+
+      const now = new Date();
+      const months = [
+        new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1)),
+        new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)),
+        new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)),
+      ];
+
+      for (const d of months) {
+        const { start, end } = monthBounds(d);
+        const key = ymKey(d);
+        await client.query(`
+          DO $$
+          BEGIN
+            IF NOT EXISTS (
+              SELECT 1 FROM pg_class c
+              JOIN pg_namespace n ON n.oid = c.relnamespace
+              WHERE n.nspname='public' AND c.relname='funnel_events_${key}'
+            ) THEN
+              EXECUTE format($$
+                CREATE TABLE public.funnel_events_%I
+                PARTITION OF public.funnel_events_new
+                FOR VALUES FROM (%L) TO (%L)
+              $$, '${key}', '${start}', '${end}');
+              EXECUTE format('CREATE UNIQUE INDEX IF NOT EXISTS ux_fe_event_id_%I ON public.funnel_events_%I (event_id)', '${key}', '${key}');
+            END IF;
+          END $$;
+        `);
+      }
+
+      await client.query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname='public' AND c.relname='funnel_events_default'
+          ) THEN
+            EXECUTE 'CREATE TABLE public.funnel_events_default
+                     PARTITION OF public.funnel_events_new DEFAULT';
+            EXECUTE 'CREATE UNIQUE INDEX IF NOT EXISTS ux_fe_event_id_default ON public.funnel_events_default (event_id)';
+          END IF;
+        END $$;
+      `);
+
+      const { rows: existsOld } = await client.query(`
+        SELECT 1 FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname='public' AND c.relname='funnel_events'
+        LIMIT 1;
+      `);
+      if (existsOld.length) {
+        console.log('[PART] copiando dados de funnel_events (legado) -> funnel_events_new');
+        await client.query(`
+          INSERT INTO public.funnel_events_new
+          (id, bot_id, bot_slug, event_name, event_id, tg_id, transaction_id, payload_id, price_cents, meta, occurred_at, created_at)
+          SELECT id, bot_id, bot_slug, event_name, event_id, tg_id, transaction_id, payload_id, price_cents, meta, occurred_at, created_at
+          FROM public.funnel_events
+          ON CONFLICT DO NOTHING;
+        `);
+      }
+
+      await client.query(`
+        DO $$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relname='funnel_events_legacy') THEN
+            NULL;
+          ELSIF EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relname='funnel_events') THEN
+            EXECUTE 'ALTER TABLE public.funnel_events RENAME TO funnel_events_legacy';
+          END IF;
+        END $$;
+      `);
+      await client.query('ALTER TABLE IF EXISTS public.funnel_events_new RENAME TO funnel_events;');
+      console.log('[PART] swap concluído');
+    } else {
+      console.log('[PART] funnel_events já é particionada: garantindo partições e índices');
+      const now = new Date();
+      const months = [
+        new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1)),
+        new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)),
+        new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)),
+      ];
+      for (const d of months) {
+        const { start, end } = monthBounds(d);
+        const key = ymKey(d);
+        await client.query(`
+          DO $$
+          BEGIN
+            IF NOT EXISTS (
+              SELECT 1 FROM pg_class c
+              JOIN pg_namespace n ON n.oid = c.relnamespace
+              WHERE n.nspname='public' AND c.relname='funnel_events_${key}'
+            ) THEN
+              EXECUTE format($$
+                CREATE TABLE public.funnel_events_%I
+                PARTITION OF public.funnel_events
+                FOR VALUES FROM (%L) TO (%L)
+              $$, '${key}', '${start}', '${end}');
+              EXECUTE format('CREATE UNIQUE INDEX IF NOT EXISTS ux_fe_event_id_%I ON public.funnel_events_%I (event_id)', '${key}', '${key}');
+            END IF;
+          END $$;
+        `);
+      }
+      await client.query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE n.nspname='public' AND c.relname='funnel_events_default'
+          ) THEN
+            EXECUTE 'CREATE TABLE public.funnel_events_default
+                     PARTITION OF public.funnel_events DEFAULT';
+            EXECUTE 'CREATE UNIQUE INDEX IF NOT EXISTS ux_fe_event_id_default ON public.funnel_events_default (event_id)';
+          END IF;
+        END $$;
+      `);
+    }
+
+    await client.query('COMMIT');
+    console.log('[PART] done');
+    process.exit(0);
+  } catch (err) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {}
+    console.error('[PART] error:', (err && err.stack) || err);
+    process.exit(1);
+  } finally {
+    try {
+      await client.end();
+    } catch {}
+  }
+}
+run();

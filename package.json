@@ -9,6 +9,7 @@
     "start": "node server.js",
     "migrate:only": "node scripts/migrate-only.js",
     "migrate:core": "node scripts/migrate-core.js",
+    "migrate:fe:partition": "node scripts/migrate-fe-partition.js",
     "seed:event": "node scripts/seed-dev-event.js"
   },
   "dependencies": {
