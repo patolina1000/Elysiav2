@@ -2,17 +2,18 @@
   "name": "elysiav2",
   "version": "1.0.0",
   "private": true,
-  "description": "Servidor Express para servir arquivos estáticos e expor variáveis de ambiente.",
+  "description": "Servidor Express para servir arquivos est\u00e1ticos e expor vari\u00e1veis de ambiente.",
   "main": "server.js",
   "scripts": {
     "build": "echo \"no build\"",
-    "start": "node server.js"
+    "start": "node server.js",
+    "migrate:only": "node scripts/migrate-only.js"
   },
   "dependencies": {
     "express": "^4.19.2",
     "pg": "^8.11.5"
   },
   "engines": {
-    "node": ">=18"
+    "node": "20.x"
   }
 }
