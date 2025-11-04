@@ -30,7 +30,7 @@ async function getPgPool() {
   return pgPool;
 }
 
-/** Migração segura e idempotente da tabela public.bots */
+/** Migração segura e idempotente da tabela public.bots (compat com esquemas antigos) */
 async function ensureBotsTable() {
   const pool = await getPgPool();
   if (!pool) return false;
@@ -40,12 +40,12 @@ BEGIN;
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '120s';
 
--- Cria a tabela se não existir (com o mínimo para existir)
+-- Base mínima
 CREATE TABLE IF NOT EXISTS public.bots (
-  id         bigserial PRIMARY KEY
+  id bigserial PRIMARY KEY
 );
 
--- Garante as colunas (ADD COLUMN IF NOT EXISTS é idempotente)
+-- Garante colunas (idempotente)
 ALTER TABLE public.bots ADD COLUMN IF NOT EXISTS name        text;
 ALTER TABLE public.bots ADD COLUMN IF NOT EXISTS slug        text;
 ALTER TABLE public.bots ADD COLUMN IF NOT EXISTS provider    text;
@@ -53,19 +53,34 @@ ALTER TABLE public.bots ADD COLUMN IF NOT EXISTS use_album   boolean;
 ALTER TABLE public.bots ADD COLUMN IF NOT EXISTS token       text;
 ALTER TABLE public.bots ADD COLUMN IF NOT EXISTS created_at  timestamptz;
 
--- Defaults seguros (não forçamos NOT NULL para evitar lock pesado)
+-- Coluna legada (alguns ambientes têm token_encrypted NOT NULL)
+ALTER TABLE public.bots ADD COLUMN IF NOT EXISTS token_encrypted bytea;
+
+-- Defaults leves
 ALTER TABLE public.bots ALTER COLUMN use_album  SET DEFAULT false;
 UPDATE public.bots SET use_album = false WHERE use_album IS NULL;
 
 ALTER TABLE public.bots ALTER COLUMN created_at SET DEFAULT now();
 UPDATE public.bots SET created_at = now() WHERE created_at IS NULL;
 
+-- Se token_encrypted existir e for NOT NULL, relaxa a restrição (token é opcional no blueprint)
+DO $$
+DECLARE nn boolean;
+BEGIN
+  SELECT (c.is_nullable = 'NO') INTO nn
+  FROM information_schema.columns c
+  WHERE c.table_schema='public' AND c.table_name='bots' AND c.column_name='token_encrypted';
+  IF nn IS TRUE THEN
+    EXECUTE 'ALTER TABLE public.bots ALTER COLUMN token_encrypted DROP NOT NULL';
+  END IF;
+END $$;
+
 -- Índice único em slug
 CREATE UNIQUE INDEX IF NOT EXISTS ux_bots_slug ON public.bots(slug);
 
 COMMIT;`;
   await pool.query(sql);
-  console.info('[DB][MIGRATION][BOTS] ok (columns ensured)');
+  console.info('[DB][MIGRATION][BOTS] ok (compat token_encrypted)');
   return true;
 }
 
@@ -90,6 +105,18 @@ function getPublicBaseUrl(req) {
   const proto = (req.headers['x-forwarded-proto'] || req.protocol || 'http');
   const host = req.headers['x-forwarded-host'] || req.get('host');
   return `${proto}://${host}`;
+}
+async function botsHasColumn(col) {
+  const pool = await getPgPool();
+  if (!pool) return false;
+  const q = `
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema='public' AND table_name='bots' AND column_name=$1
+    LIMIT 1
+  `;
+  const r = await pool.query(q, [col]);
+  return r.rowCount > 0;
 }
 // Defaults imutáveis (blueprint)
 const IMMUTABLE_DEFAULTS = Object.freeze({
@@ -135,13 +162,20 @@ app.get('/api/admin/bots', async (req, res) => {
   try {
     let list = [];
     if (pool) {
-      const { rows } = await pool.query(`
-        SELECT name, slug, provider, use_album,
-               (token IS NOT NULL) AS has_token,
-               created_at
-        FROM public.bots
-        ORDER BY created_at DESC
-      `);
+      const hasEnc = await botsHasColumn('token_encrypted');
+      const sel = hasEnc
+        ? `SELECT name, slug, provider, use_album,
+                  ( (token IS NOT NULL) OR (token_encrypted IS NOT NULL) ) AS has_token,
+                  created_at
+             FROM public.bots
+             ORDER BY created_at DESC`
+        : `SELECT name, slug, provider, use_album,
+                  (token IS NOT NULL) AS has_token,
+                  created_at
+             FROM public.bots
+             ORDER BY created_at DESC`;
+
+      const { rows } = await pool.query(sel);
       list = rows.map(r => ({
         name: r.name,
         slug: r.slug,
@@ -158,11 +192,11 @@ app.get('/api/admin/bots', async (req, res) => {
       }));
       console.info('[ADMIN_BOTS][LIST]', { request_id, count: list.length, store: 'pg' });
     } else {
-      // fallback memória (do Prompt 1)
+      // fallback memória
       list = Array.from(mem.bots.values()).map(b => ({
         name: b.name,
         slug: b.slug,
-        provider: b.provider || 'unknown',
+        provider: b.provider,
         use_album: b.use_album,
         has_token: !!b.token,
         rate_per_minute: b.rate_per_minute,
@@ -198,23 +232,29 @@ app.post('/api/admin/bots', express.json(), async (req, res) => {
 
   try {
     if (pool) {
-      // tenta inserir; se slug já existir, conflita
-      const q = `
-        INSERT INTO public.bots (name, slug, provider, use_album, token)
-        VALUES ($1,$2,$3,$4,$5)
-        ON CONFLICT (slug) DO NOTHING
-        RETURNING name, slug, provider, use_album, (token IS NOT NULL) AS has_token, created_at
-      `;
+      // monta INSERT dinamicamente
+      const hasEnc = await botsHasColumn('token_encrypted');
+      const cols = ['name','slug','provider','use_album','token'];
+      const placeholders = ['$1','$2','$3','$4','$5'];
       const vals = [name, slug, provider, !!use_album, token || null];
-      const r = await pool.query(q, vals);
 
+      // não setamos token_encrypted aqui (fica NULL) — agora é permitido
+      const q = `
+        INSERT INTO public.bots (${cols.join(',')})
+        VALUES (${placeholders.join(',')})
+        ON CONFLICT (slug) DO NOTHING
+        RETURNING name, slug, provider, use_album,
+                  ( (token IS NOT NULL) ${hasEnc ? 'OR (token_encrypted IS NOT NULL)' : ''} ) AS has_token,
+                  created_at
+      `;
+
+      const r = await pool.query(q, vals);
       if (r.rows.length === 0) {
         console.warn('[ADMIN_BOTS][CREATE][CONFLICT]', { request_id, slug });
         return res.status(409).json({ ok: false, error: 'SLUG_ALREADY_EXISTS' });
       }
 
       const row = r.rows[0];
-
       console.info('[ADMIN_BOTS][CREATE][OK]', {
         request_id, slug, provider,
         use_album: row.use_album,
