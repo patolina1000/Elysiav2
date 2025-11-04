@@ -5,6 +5,35 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const publicDirectory = path.join(__dirname, 'public');
 
+app.use(express.json());
+
+app.post('/api/telegram/validate-token', async (req, res) => {
+  const token = typeof req.body?.token === 'string' ? req.body.token.trim() : '';
+  if (!token) {
+    return res.status(400).json({ ok: false, error: 'TOKEN_REQUIRED' });
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+  const url = `https://api.telegram.org/bot${encodeURIComponent(token)}/getMe`;
+
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeout);
+    const data = await response.json().catch(() => ({}));
+    if (data && data.ok) {
+      const { id, username, first_name } = data.result || {};
+      return res.json({ ok: true, result: { id, username, first_name } });
+    }
+    const reason = (data && (data.description || data.error)) || 'INVALID_TOKEN';
+    return res.status(400).json({ ok: false, error: reason });
+  } catch (error) {
+    clearTimeout(timeout);
+    const message = error && error.name === 'AbortError' ? 'TIMEOUT' : 'NETWORK';
+    return res.status(502).json({ ok: false, error: message });
+  }
+});
+
 app.use(express.static(publicDirectory, {
   extensions: ['html'],
   fallthrough: true
