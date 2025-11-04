@@ -213,9 +213,11 @@ const webhookQueue = createQueue(async (job) => {
     }
 
     // 2) (Se existir 1º envio real, posicione a métrica logo após o sendMessage)
-    //    Exemplo: ensureStartLatency(); após o envio real
+    //    Exemplo com envio real (ajuste para sua função):
+    //    const sent = await telegramSendMessage(botToken, chatId, texto, opts);
+    //    if (sent) ensureStartLatency();
 
-    // 3) Fallback: se não houver envio implementado ainda, mede antes do DONE
+    // Fallback (mantém): se não houver envio implementado ainda, mede antes do DONE
     ensureStartLatency();
   } catch (err) {
     console.error('[WEBHOOK][PROCESS][ERR]', err?.message || err);
