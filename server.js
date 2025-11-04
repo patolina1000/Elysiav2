@@ -34,34 +34,38 @@ async function getPgPool() {
 async function ensureBotsTable() {
   const pool = await getPgPool();
   if (!pool) return false;
+
   const sql = `
 BEGIN;
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '120s';
 
+-- Cria a tabela se não existir (com o mínimo para existir)
 CREATE TABLE IF NOT EXISTS public.bots (
-  id          bigserial PRIMARY KEY,
-  name        text      NOT NULL,
-  slug        text      NOT NULL,
-  provider    text      NOT NULL,
-  use_album   boolean   NOT NULL DEFAULT false,
-  token       text      NULL,
-  created_at  timestamptz NOT NULL DEFAULT now()
+  id         bigserial PRIMARY KEY
 );
 
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_indexes
-    WHERE schemaname='public' AND indexname='ux_bots_slug'
-  ) THEN
-    EXECUTE 'CREATE UNIQUE INDEX ux_bots_slug ON public.bots(slug)';
-  END IF;
-END $$;
+-- Garante as colunas (ADD COLUMN IF NOT EXISTS é idempotente)
+ALTER TABLE public.bots ADD COLUMN IF NOT EXISTS name        text;
+ALTER TABLE public.bots ADD COLUMN IF NOT EXISTS slug        text;
+ALTER TABLE public.bots ADD COLUMN IF NOT EXISTS provider    text;
+ALTER TABLE public.bots ADD COLUMN IF NOT EXISTS use_album   boolean;
+ALTER TABLE public.bots ADD COLUMN IF NOT EXISTS token       text;
+ALTER TABLE public.bots ADD COLUMN IF NOT EXISTS created_at  timestamptz;
+
+-- Defaults seguros (não forçamos NOT NULL para evitar lock pesado)
+ALTER TABLE public.bots ALTER COLUMN use_album  SET DEFAULT false;
+UPDATE public.bots SET use_album = false WHERE use_album IS NULL;
+
+ALTER TABLE public.bots ALTER COLUMN created_at SET DEFAULT now();
+UPDATE public.bots SET created_at = now() WHERE created_at IS NULL;
+
+-- Índice único em slug
+CREATE UNIQUE INDEX IF NOT EXISTS ux_bots_slug ON public.bots(slug);
 
 COMMIT;`;
   await pool.query(sql);
-  console.info('[DB][MIGRATION][BOTS] ok');
+  console.info('[DB][MIGRATION][BOTS] ok (columns ensured)');
   return true;
 }
 
@@ -141,7 +145,7 @@ app.get('/api/admin/bots', async (req, res) => {
       list = rows.map(r => ({
         name: r.name,
         slug: r.slug,
-        provider: r.provider,
+        provider: r.provider || 'unknown',
         use_album: r.use_album,
         has_token: r.has_token,
         rate_per_minute: IMMUTABLE_DEFAULTS.rate_per_minute,
@@ -158,7 +162,7 @@ app.get('/api/admin/bots', async (req, res) => {
       list = Array.from(mem.bots.values()).map(b => ({
         name: b.name,
         slug: b.slug,
-        provider: b.provider,
+        provider: b.provider || 'unknown',
         use_album: b.use_album,
         has_token: !!b.token,
         rate_per_minute: b.rate_per_minute,
