@@ -175,27 +175,18 @@
               <p class="form-hint hidden" data-error-for="provider"></p>
             </div>
             <div class="form-field">
-              <label for="bot-sandbox" class="form-label">Sandbox</label>
-              <select id="bot-sandbox" name="sandbox" class="form-input">
-                <option value="false" selected>false</option>
-                <option value="true">true</option>
-              </select>
-              <p class="form-hint hidden" data-error-for="sandbox"></p>
-            </div>
-            <div class="form-field">
               <label for="bot-rate" class="form-label">Rate por minuto</label>
-              <input id="bot-rate" name="rate_per_min" type="number" min="1" value="60" class="form-input" />
-              <p class="text-xs text-zinc-500">limite global por bot</p>
-              <p class="form-hint hidden" data-error-for="rate_per_min"></p>
-            </div>
-            <div class="form-field">
-              <label for="bot-renderer" class="form-label">Renderer</label>
-              <select id="bot-renderer" name="renderer" class="form-input">
-                <option value="markdownV2" selected>markdownV2</option>
-                <option value="html">html</option>
-                <option value="plain">plain</option>
-              </select>
-              <p class="form-hint hidden" data-error-for="renderer"></p>
+              <input
+                id="bot-rate"
+                name="rate_per_minute"
+                type="number"
+                min="1"
+                value="60"
+                class="form-input"
+                readonly
+                disabled
+              />
+              <p class="text-xs text-zinc-500">60 rpm (fixo)</p>
             </div>
             <div class="form-field md:col-span-2">
               <label class="form-label inline-flex items-center gap-2">
@@ -204,17 +195,8 @@
               </label>
               <p class="form-hint hidden" data-error-for="use_album"></p>
             </div>
-            <div class="form-field">
-              <label for="bot-typing-delay" class="form-label">Typing delay (ms)</label>
-              <input id="bot-typing-delay" name="typing_delay_ms" type="number" min="0" max="5000" value="400" class="form-input" />
-              <p class="form-hint hidden" data-error-for="typing_delay_ms"></p>
-            </div>
-            <div class="form-field">
-              <label for="bot-watermark" class="form-label">Watermark (opcional)</label>
-              <input id="bot-watermark" name="watermark" type="text" maxlength="64" class="form-input" />
-              <p class="form-hint hidden" data-error-for="watermark"></p>
-            </div>
           </div>
+          <p class="text-xs text-zinc-500">Padrões: 60 rpm, MarkdownV2, delay 0, sem watermark, produção.</p>
           <div class="flex flex-col gap-3 sm:flex-row sm:justify-end">
             <button type="button" class="btn-secondary sm:flex-1" data-close-modal="bot-modal">Fechar</button>
             <button type="submit" id="create-bot-btn" class="btn-primary sm:flex-1">Criar Bot</button>

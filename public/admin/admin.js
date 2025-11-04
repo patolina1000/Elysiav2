@@ -49,6 +49,14 @@
     abortController: null,
   };
 
+  const BOT_DEFAULTS = Object.freeze({
+    rate_per_minute: 60,
+    sandbox: false,
+    renderer: 'markdownV2',
+    typing_delay_ms: 0,
+    watermark: null,
+  });
+
   function safeGetLocalToken() {
     try {
       return localStorage.getItem(ADMIN_TOKEN_KEY) || '';
@@ -142,12 +150,18 @@
 
     bots.forEach((bot) => {
       const row = document.createElement('tr');
+      const rpm =
+        typeof bot.rate_per_minute === 'number'
+          ? bot.rate_per_minute
+          : typeof bot.rate_per_min === 'number'
+          ? bot.rate_per_min
+          : BOT_DEFAULTS.rate_per_minute;
       const cells = [
         bot.name || '—',
         bot.slug || '—',
         bot.provider || '—',
         bot.sandbox ? 'Sim' : 'Não',
-        typeof bot.rate_per_min === 'number' ? bot.rate_per_min : bot.rate_per_min || '—',
+        rpm,
         formatFlags(bot.flags),
       ];
 
@@ -302,12 +316,11 @@
     if (id === 'bot-modal') {
       elements.botForm.reset();
       document.querySelector('#bot-provider').value = 'pushinpay';
-      document.querySelector('#bot-sandbox').value = 'false';
-      document.querySelector('#bot-rate').value = '60';
-      document.querySelector('#bot-renderer').value = 'markdownV2';
+      const rateInput = document.querySelector('#bot-rate');
+      if (rateInput) {
+        rateInput.value = String(BOT_DEFAULTS.rate_per_minute);
+      }
       document.querySelector('#bot-album').checked = true;
-      document.querySelector('#bot-typing-delay').value = '400';
-      document.querySelector('#bot-watermark').value = '';
       clearFieldErrors();
       setTimeout(() => {
         const firstInput = modal.querySelector('input, select, textarea, button:not([type="button"])');
@@ -453,28 +466,13 @@
 
   function serializeBotForm() {
     const formData = new FormData(elements.botForm);
-    const rateValue = Number.parseInt(formData.get('rate_per_min'), 10);
-    const typingDelayValue = Number.parseInt(formData.get('typing_delay_ms'), 10);
-    const payload = {
+    return {
       name: (formData.get('name') || '').toString().trim(),
       slug: (formData.get('slug') || '').toString().trim(),
       provider: (formData.get('provider') || '').toString().trim(),
-      sandbox: formData.get('sandbox') === 'true',
-      rate_per_min: Number.isFinite(rateValue) && rateValue > 0 ? rateValue : 60,
-      renderer: (formData.get('renderer') || '').toString().trim(),
       use_album: formData.get('use_album') === 'on',
-      typing_delay_ms:
-        Number.isFinite(typingDelayValue)
-          ? Math.min(Math.max(typingDelayValue, 0), 5000)
-          : 0,
+      ...BOT_DEFAULTS,
     };
-
-    const watermark = (formData.get('watermark') || '').toString().trim();
-    if (watermark) {
-      payload.watermark = watermark;
-    }
-
-    return payload;
   }
 
   async function handleBotSubmit(event) {
