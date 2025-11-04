@@ -151,10 +151,12 @@ const publicDirectory = path.join(__dirname, 'public');
 
 app.use(express.json());
 
-// Migração segura no boot (rápida e idempotente)
-ensureBotsTable().catch(err => {
-  console.error('[DB][MIGRATION][BOTS] erro', err?.message);
-});
+// (Opcional, somente quando explicitamente habilitado)
+if (process.env.ENABLE_BOOT_MIGRATION === 'true') {
+  ensureBotsTable().catch(err => {
+    console.error('[DB][MIGRATION][BOTS] erro', err?.message);
+  });
+}
 
 // gerador simples de request_id
 function rid() {
