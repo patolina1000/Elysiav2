@@ -4,6 +4,24 @@
   const SEARCH_DEBOUNCE = 250;
   const MAX_TOASTS = 3;
 
+  // Escapa metacaracteres para usar com new RegExp com segurança
+  function escapeRegExp(s) {
+    return String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  // Cabeçalhos de autorização (não grava nada; só lê se já existir em memória/storage)
+  function authHeaders() {
+    try {
+      const t =
+        window.ADMIN_API_TOKEN ||
+        sessionStorage.getItem('ADMIN_API_TOKEN') ||
+        localStorage.getItem('ADMIN_API_TOKEN');
+      return t ? { Authorization: 'Bearer ' + t } : {};
+    } catch (err) {
+      return {};
+    }
+  }
+
   const env = window.__ENV__ || {};
   const appOrigin = window.location.origin;
   const baseUrl = (env.APP_BASE_URL && env.APP_BASE_URL.trim()) || appOrigin;
@@ -152,10 +170,14 @@
   }
 
   function getAuthHeaders() {
-    if (!state.token) return null;
-    return {
-      Authorization: `Bearer ${state.token}`,
-    };
+    const token = state.token && state.token.trim();
+    if (token) {
+      return {
+        Authorization: `Bearer ${token}`,
+      };
+    }
+    const headers = authHeaders();
+    return headers && headers.Authorization ? headers : null;
   }
 
   function renderSkeletonRows(count = 5) {
@@ -254,13 +276,14 @@
   }
 
   function applyFilter() {
-    const term = state.searchTerm.trim().toLowerCase();
+    const term = state.searchTerm.trim();
     let filtered = state.bots;
     if (term) {
+      const rx = new RegExp(escapeRegExp(term), 'i');
       filtered = state.bots.filter((bot) => {
-        const name = String(bot.name || '').toLowerCase();
-        const slug = String(bot.slug || '').toLowerCase();
-        return name.includes(term) || slug.includes(term);
+        const name = String(bot.name || '');
+        const slug = String(bot.slug || '');
+        return rx.test(name) || rx.test(slug);
       });
     }
     renderBots(filtered);
@@ -961,13 +984,21 @@
   }
 
   window.addEventListener('popstate', () => {
-    adminRouter();
+    try {
+      adminRouter();
+    } catch (err) {
+      console.error(err);
+    }
   });
 
   function init() {
     registerEventListeners();
     initToken();
-    adminRouter();
+    try {
+      adminRouter();
+    } catch (err) {
+      console.error(err);
+    }
   }
 
   if (document.readyState === 'loading') {
