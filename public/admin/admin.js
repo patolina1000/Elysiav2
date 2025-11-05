@@ -9,7 +9,7 @@
     return String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
-  // Cabeçalhos de autorização (não grava nada; só lê se já existir em memória/storage)
+  // Cabeçalhos de autorização (nunca logar token)
   function authHeaders() {
     try {
       const t =
