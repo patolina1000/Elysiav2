@@ -45,63 +45,118 @@
       </header>
 
       <main class="mx-auto max-w-6xl px-6 py-6 space-y-6">
-        <section class="rounded-3xl bg-surfaceLight border border-surfaceMuted shadow-raised p-6 space-y-4">
-          <div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-            <div class="flex-1">
-              <label for="search-input" class="sr-only">Buscar bot</label>
-              <div class="relative">
-                <span class="pointer-events-none absolute inset-y-0 left-3 flex items-center text-zinc-500">🔎</span>
-                <input
-                  id="search-input"
-                  type="search"
-                  autocomplete="off"
-                  placeholder="Buscar por nome/slug…"
-                  class="w-full rounded-2xl bg-surface border border-surfaceMuted pl-10 pr-4 py-2 text-sm focus:border-accent focus:ring-2 focus:ring-accent/40 outline-none transition"
-                />
+        <div id="bots-list-view" class="space-y-6">
+          <section class="rounded-3xl bg-surfaceLight border border-surfaceMuted shadow-raised p-6 space-y-4">
+            <div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+              <div class="flex-1">
+                <label for="search-input" class="sr-only">Buscar bot</label>
+                <div class="relative">
+                  <span class="pointer-events-none absolute inset-y-0 left-3 flex items-center text-zinc-500">🔎</span>
+                  <input
+                    id="search-input"
+                    type="search"
+                    autocomplete="off"
+                    placeholder="Buscar por nome/slug…"
+                    class="w-full rounded-2xl bg-surface border border-surfaceMuted pl-10 pr-4 py-2 text-sm focus:border-accent focus:ring-2 focus:ring-accent/40 outline-none transition"
+                  />
+                </div>
+              </div>
+              <div class="flex gap-3">
+                <button id="refresh-btn" class="btn-secondary" type="button">🔄 Atualizar</button>
               </div>
             </div>
-            <div class="flex gap-3">
-              <button id="refresh-btn" class="btn-secondary" type="button">🔄 Atualizar</button>
-            </div>
-          </div>
 
-          <div class="overflow-hidden rounded-3xl border border-surfaceMuted">
-            <table class="min-w-full divide-y divide-surfaceMuted text-sm" aria-live="polite">
-              <thead class="bg-surface">
-                <tr>
-                  <th scope="col" class="table-head">Nome</th>
-                  <th scope="col" class="table-head">Slug</th>
-                  <th scope="col" class="table-head">Provider</th>
-                  <th scope="col" class="table-head">Sandbox</th>
-                  <th scope="col" class="table-head">Rate/min</th>
-                  <th scope="col" class="table-head">Flags</th>
-                </tr>
-              </thead>
-              <tbody id="bots-table-body" class="divide-y divide-surfaceMuted">
-                <!-- Conteúdo dinâmico -->
-              </tbody>
-            </table>
-            <div id="empty-state" class="hidden px-6 py-12 text-center text-sm text-zinc-400">
-              <p class="font-medium text-zinc-200">Nenhum bot encontrado.</p>
-              <p class="mt-2">Clique em “Novo Bot” para criar.</p>
+            <div class="overflow-hidden rounded-3xl border border-surfaceMuted">
+              <table class="min-w-full divide-y divide-surfaceMuted text-sm" aria-live="polite">
+                <thead class="bg-surface">
+                  <tr>
+                    <th scope="col" class="table-head">Nome</th>
+                    <th scope="col" class="table-head">Slug</th>
+                    <th scope="col" class="table-head">Provider</th>
+                    <th scope="col" class="table-head">Sandbox</th>
+                    <th scope="col" class="table-head">Rate/min</th>
+                    <th scope="col" class="table-head">Flags</th>
+                    <th scope="col" class="table-head">Ações</th>
+                  </tr>
+                </thead>
+                <tbody id="bots-table-body" class="divide-y divide-surfaceMuted">
+                  <!-- Conteúdo dinâmico -->
+                </tbody>
+              </table>
+              <div id="empty-state" class="hidden px-6 py-12 text-center text-sm text-zinc-400">
+                <p class="font-medium text-zinc-200">Nenhum bot encontrado.</p>
+                <p class="mt-2">Clique em “Novo Bot” para criar.</p>
+              </div>
             </div>
-          </div>
-          <div id="error-hint" class="hidden rounded-2xl border border-amber-500/50 bg-amber-500/10 px-4 py-3 text-sm text-amber-200"></div>
-        </section>
+            <div id="error-hint" class="hidden rounded-2xl border border-amber-500/50 bg-amber-500/10 px-4 py-3 text-sm text-amber-200"></div>
+          </section>
 
-        <section id="instructions-card" class="hidden rounded-3xl border border-surfaceMuted bg-surfaceLight shadow-raised p-6 space-y-4">
-          <div class="flex items-start justify-between gap-4">
-            <div>
-              <h2 class="text-lg font-semibold">Webhook configurado</h2>
-              <p class="text-sm text-zinc-400">Use a URL abaixo para configurar o webhook do Telegram. O secret é definido no backend.</p>
+          <section id="instructions-card" class="hidden rounded-3xl border border-surfaceMuted bg-surfaceLight shadow-raised p-6 space-y-4">
+            <div class="flex items-start justify-between gap-4">
+              <div>
+                <h2 class="text-lg font-semibold">Webhook configurado</h2>
+                <p class="text-sm text-zinc-400">Use a URL abaixo para configurar o webhook do Telegram. O secret é definido no backend.</p>
+              </div>
+              <button id="close-instructions" type="button" class="text-zinc-500 hover:text-zinc-300" aria-label="Fechar instruções">✖️</button>
             </div>
-            <button id="close-instructions" type="button" class="text-zinc-500 hover:text-zinc-300" aria-label="Fechar instruções">✖️</button>
+            <div class="rounded-2xl border border-surfaceMuted bg-surface px-4 py-3 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+              <code id="webhook-url" class="text-sm break-all text-accent"></code>
+              <button id="copy-webhook" class="btn-secondary md:self-start" type="button">📋 Copiar URL</button>
+            </div>
+          </section>
+        </div>
+
+        <section id="bot-detail-view" style="display:none" class="space-y-6"></section>
+
+        <template id="tpl-bot-detail">
+          <div class="rounded-3xl bg-surfaceLight border border-surfaceMuted shadow-raised p-6 space-y-6">
+            <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+              <h2 class="text-xl font-semibold">Bot • <span data-field="name"></span></h2>
+              <a class="btn-secondary inline-flex items-center gap-2 px-4 py-2" href="/admin" data-action="back">← Voltar</a>
+            </div>
+            <div class="grid gap-4 md:grid-cols-2">
+              <div class="form-field">
+                <label class="form-label">Nome</label>
+                <input data-field="name" type="text" readonly class="form-input" />
+              </div>
+              <div class="form-field">
+                <label class="form-label">Slug</label>
+                <input data-field="slug" type="text" readonly class="form-input" />
+              </div>
+            </div>
+            <div class="grid gap-4 md:grid-cols-2">
+              <div class="form-field">
+                <label class="form-label">Provider</label>
+                <input data-field="provider" type="text" readonly class="form-input" />
+              </div>
+              <div class="form-field">
+                <label class="form-label">Renderizador</label>
+                <input value="MarkdownV2" type="text" readonly class="form-input" />
+              </div>
+            </div>
+            <div class="grid gap-4 md:grid-cols-2">
+              <div class="form-field">
+                <label class="form-label">Token do Bot (não armazenado)</label>
+                <div class="flex items-center gap-2">
+                  <input data-field="token" type="password" placeholder="cole aqui para validar" autocomplete="off" class="form-input flex-1" />
+                  <button class="btn-secondary text-xs px-3 py-2" data-action="reveal">👁</button>
+                  <button class="btn-primary text-xs px-3 py-2" data-action="validate">Validar</button>
+                </div>
+                <p class="text-xs text-zinc-400" data-field="token-status">Nunca enviamos nem salvamos este valor.</p>
+              </div>
+              <div class="form-field">
+                <label class="form-label">Webhook</label>
+                <div class="flex items-center gap-2">
+                  <input data-field="webhook" type="text" readonly class="form-input flex-1" />
+                  <button class="btn-secondary text-xs px-3 py-2" data-action="copy-webhook">Copiar</button>
+                </div>
+              </div>
+            </div>
+            <p class="text-sm text-zinc-400">
+              Padrões: <b>MarkdownV2</b>, <b>delay 0</b>, <b>sem watermark</b>, produção (rate <b>60 rpm</b>).
+            </p>
           </div>
-          <div class="rounded-2xl border border-surfaceMuted bg-surface px-4 py-3 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-            <code id="webhook-url" class="text-sm break-all text-accent"></code>
-            <button id="copy-webhook" class="btn-secondary md:self-start" type="button">📋 Copiar URL</button>
-          </div>
-        </section>
+        </template>
       </main>
     </div>
 
