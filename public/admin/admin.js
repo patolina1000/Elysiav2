@@ -10,6 +10,8 @@
   const publicBaseUrl = (env.PUBLIC_BASE_URL && env.PUBLIC_BASE_URL.trim()) || '';
 
   const elements = {
+    botsListView: document.querySelector('#bots-list-view'),
+    botDetailView: document.querySelector('#bot-detail-view'),
     tableBody: document.querySelector('#bots-table-body'),
     emptyState: document.querySelector('#empty-state'),
     refreshBtn: document.querySelector('#refresh-btn'),
@@ -61,6 +63,35 @@
     typing_delay_ms: 0,
     watermark: null,
   };
+
+  function currentAdminSlug() {
+    const cleanedPath = window.location.pathname.replace(/\/+$, '');
+    const parts = cleanedPath.split('/');
+    if (parts.length >= 3 && parts[1] === 'admin') {
+      try {
+        return decodeURIComponent(parts[2]);
+      } catch (err) {
+        return parts[2];
+      }
+    }
+    return null;
+  }
+
+  async function adminRouter() {
+    const slug = currentAdminSlug();
+    if (elements.botsListView) {
+      elements.botsListView.style.display = slug ? 'none' : '';
+    }
+    if (elements.botDetailView) {
+      elements.botDetailView.style.display = slug ? '' : 'none';
+    }
+
+    if (slug) {
+      await renderBotDetail(slug);
+    } else {
+      await renderBotsList();
+    }
+  }
 
   function safeGetLocalToken() {
     try {
@@ -132,7 +163,7 @@
     for (let i = 0; i < count; i++) {
       const row = document.createElement('tr');
       row.className = 'loading';
-      for (let j = 0; j < 6; j++) {
+      for (let j = 0; j < 7; j++) {
         const cell = document.createElement('td');
         cell.className = 'table-cell';
         const placeholder = document.createElement('div');
@@ -177,8 +208,39 @@
         row.appendChild(cell);
       });
 
+      const actionsCell = document.createElement('td');
+      actionsCell.className = 'table-cell text-sm text-zinc-200';
+      const btnEdit = document.createElement('button');
+      btnEdit.type = 'button';
+      btnEdit.className = 'btn-secondary text-xs px-3 py-1';
+      btnEdit.textContent = 'Editar';
+      if (bot.slug) {
+        btnEdit.addEventListener('click', (event) => {
+          event.preventDefault();
+          const slug = encodeURIComponent(bot.slug);
+          window.open(`/admin/${slug}`, '_blank', 'noopener');
+        });
+      } else {
+        btnEdit.disabled = true;
+      }
+      actionsCell.appendChild(btnEdit);
+      row.appendChild(actionsCell);
+
       elements.tableBody.appendChild(row);
     });
+  }
+
+  async function renderBotsList() {
+    if (!state.token) {
+      await fetchBots();
+      return;
+    }
+
+    if (!state.bots.length) {
+      await fetchBots();
+    } else {
+      applyFilter();
+    }
   }
 
   function formatFlags(flags) {
@@ -219,7 +281,7 @@
     if (!state.token) {
       showToast('warning', 'Informe a chave admin para listar os bots.');
       openModal('token-modal');
-      return;
+      return state.bots;
     }
 
     if (state.abortController) {
@@ -227,7 +289,7 @@
     }
 
     const headers = getAuthHeaders();
-    if (!headers) return;
+    if (!headers) return state.bots;
 
     setLoading(true);
     elements.errorHint.classList.add('hidden');
@@ -250,13 +312,13 @@
 
       if (response.status === 401) {
         handleUnauthorized();
-        return;
+        return state.bots;
       }
 
       if (response.status === 429) {
         showToast('warning', 'Muitas requisições. Aguarde alguns segundos.');
         displayErrorHint('Muitas requisições. Aguarde alguns segundos.');
-        return;
+        return state.bots;
       }
 
       if (!response.ok) {
@@ -287,6 +349,8 @@
         state.abortController = null;
       }
     }
+
+    return state.bots;
   }
 
   function handleUnauthorized() {
@@ -632,6 +696,172 @@
     elements.instructionsCard.classList.remove('hidden');
   }
 
+  async function renderBotDetail(slug) {
+    if (!elements.botDetailView) return;
+
+    const root = elements.botDetailView;
+    root.innerHTML = '';
+
+    const template = document.getElementById('tpl-bot-detail');
+    if (!template) {
+      const fallback = document.createElement('p');
+      fallback.className = 'text-sm text-zinc-400';
+      fallback.textContent = 'Detalhe indisponível.';
+      root.appendChild(fallback);
+      return;
+    }
+
+    if (!slug) {
+      const message = document.createElement('p');
+      message.className = 'text-sm text-zinc-400';
+      message.textContent = 'Bot não encontrado.';
+      root.appendChild(message);
+      return;
+    }
+
+    if (!state.token) {
+      const message = document.createElement('p');
+      message.className = 'text-sm text-zinc-400';
+      message.textContent = 'Informe a chave admin para visualizar os detalhes do bot.';
+      root.appendChild(message);
+      openModal('token-modal');
+      showToast('warning', 'Informe a chave admin para visualizar os detalhes do bot.');
+      return;
+    }
+
+    const loading = document.createElement('p');
+    loading.className = 'text-sm text-zinc-400';
+    loading.textContent = 'Carregando…';
+    root.appendChild(loading);
+
+    let bot = state.bots.find((item) => item.slug === slug);
+    if (!bot) {
+      const bots = await fetchBots();
+      bot = Array.isArray(bots) ? bots.find((item) => item.slug === slug) : null;
+    }
+
+    root.innerHTML = '';
+
+    if (!bot) {
+      const message = document.createElement('p');
+      message.className = 'text-sm text-zinc-400';
+      message.textContent = state.token
+        ? 'Bot não encontrado.'
+        : 'Informe a chave admin para visualizar os detalhes do bot.';
+      root.appendChild(message);
+      return;
+    }
+
+    const fragment = template.content.cloneNode(true);
+
+    const assignField = (field, value) => {
+      const normalized = value ?? '';
+      fragment.querySelectorAll(`[data-field="${field}"]`).forEach((el) => {
+        if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+          el.value = normalized;
+        } else {
+          el.textContent = normalized;
+        }
+      });
+    };
+
+    assignField('name', bot.name || '');
+    assignField('slug', bot.slug || '');
+    assignField('provider', bot.provider || '');
+
+    const base = publicBaseUrl || appOrigin;
+    const webhookValue = bot.webhook_url || `${base.replace(/\/$/, '')}/tg/${bot.slug}/webhook`;
+    assignField('webhook', webhookValue);
+
+    const backLink = fragment.querySelector('[data-action="back"]');
+    if (backLink) {
+      backLink.addEventListener('click', (event) => {
+        event.preventDefault();
+        window.location.href = '/admin';
+      });
+    }
+
+    const tokenInput = fragment.querySelector('[data-field="token"]');
+    const statusEl = fragment.querySelector('[data-field="token-status"]');
+
+    const revealBtn = fragment.querySelector('[data-action="reveal"]');
+    if (revealBtn && tokenInput) {
+      revealBtn.addEventListener('click', (event) => {
+        event.preventDefault();
+        tokenInput.type = tokenInput.type === 'password' ? 'text' : 'password';
+      });
+    }
+
+    const validateBtn = fragment.querySelector('[data-action="validate"]');
+    if (validateBtn && tokenInput) {
+      validateBtn.addEventListener('click', async (event) => {
+        event.preventDefault();
+        const token = (tokenInput.value || '').trim();
+        if (!token) {
+          if (statusEl) statusEl.textContent = 'Cole o token antes de validar.';
+          return;
+        }
+
+        if (statusEl) statusEl.textContent = 'Validando…';
+
+        let timeoutId;
+        try {
+          const controller = new AbortController();
+          timeoutId = setTimeout(() => controller.abort(), 5000);
+          const response = await fetch(`${baseUrl}/api/telegram/validate-token`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token }),
+            signal: controller.signal,
+          });
+          clearTimeout(timeoutId);
+
+          if (response.ok) {
+            const data = await response.json().catch(() => ({}));
+            if (data && data.ok) {
+              if (statusEl) statusEl.textContent = 'Válido ✅';
+            } else {
+              const message = (data && data.error) || 'Inválido';
+              if (statusEl) statusEl.textContent = `${message} ❌`;
+            }
+          } else {
+            if (statusEl) statusEl.textContent = response.status === 400 ? 'Inválido ❌' : 'Erro ao validar';
+          }
+        } catch (err) {
+          if (timeoutId) clearTimeout(timeoutId);
+          if (statusEl) statusEl.textContent = 'Timeout/Erro de rede';
+        }
+      });
+    }
+
+    const copyBtn = fragment.querySelector('[data-action="copy-webhook"]');
+    if (copyBtn) {
+      copyBtn.addEventListener('click', async (event) => {
+        event.preventDefault();
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(webhookValue);
+          } else {
+            const textarea = document.createElement('textarea');
+            textarea.value = webhookValue;
+            document.body.appendChild(textarea);
+            textarea.select();
+            try {
+              document.execCommand('copy');
+            } finally {
+              document.body.removeChild(textarea);
+            }
+          }
+          if (statusEl) statusEl.textContent = 'Webhook copiado ✔';
+        } catch (err) {
+          if (statusEl) statusEl.textContent = 'Falha ao copiar';
+        }
+      });
+    }
+
+    root.appendChild(fragment);
+  }
+
   function copyWebhookUrl() {
     const text = elements.webhookUrl.textContent.trim();
     if (!text) return;
@@ -668,13 +898,14 @@
     updateTokenSourceDisplay();
     closeModal('token-modal');
     showToast('success', 'Token salvo.');
-    fetchBots();
+    adminRouter();
   }
 
   function handleTokenClear() {
     clearToken();
     elements.tokenInput.value = '';
     showToast('success', 'Token limpo.');
+    adminRouter();
   }
 
   function handleOverlayClick(event) {
@@ -729,12 +960,14 @@
     );
   }
 
+  window.addEventListener('popstate', () => {
+    adminRouter();
+  });
+
   function init() {
     registerEventListeners();
     initToken();
-    if (state.token) {
-      fetchBots();
-    }
+    adminRouter();
   }
 
   if (document.readyState === 'loading') {

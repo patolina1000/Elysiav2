@@ -153,6 +153,14 @@ const publicDirectory = path.join(__dirname, 'public');
 
 app.use(express.json());
 
+// Admin UI (arquivos estáticos)
+const adminDirectory = path.join(publicDirectory, 'admin');
+app.use('/admin', express.static(adminDirectory));
+// SPA: qualquer subrota de /admin serve o index.html para o front roteá-la
+app.get('/admin/*', (req, res) => {
+  res.sendFile(path.join(adminDirectory, 'index.html'));
+});
+
 // (Opcional, somente quando explicitamente habilitado)
 if (process.env.ENABLE_BOOT_MIGRATION === 'true') {
   ensureBotsTable().catch(err => {
