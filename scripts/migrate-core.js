@@ -1,5 +1,6 @@
 // scripts/migrate-core.js
 /* eslint-disable no-console */
+require('dotenv').config();
 const { Client } = require('pg');
 
 async function exec(client, sql) { await client.query(sql); }

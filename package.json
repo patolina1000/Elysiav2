@@ -10,11 +10,15 @@
     "migrate:only": "node scripts/migrate-only.js",
     "migrate:core": "node scripts/migrate-core.js",
     "migrate:fe:partition": "node scripts/migrate-fe-partition.js",
-    "seed:event": "node scripts/seed-dev-event.js"
+    "seed:event": "node scripts/seed-dev-event.js",
+    "tunnel": "ngrok http --region sa 3000"
   },
   "dependencies": {
+    "dotenv": "^17.2.3",
     "express": "^4.19.2",
-    "pg": "^8.11.5"
+    "pg": "^8.11.5",
+    "undici": "^7.0.0",
+    "pino": "^9.3.2"
   },
   "engines": {
     "node": "20.x"

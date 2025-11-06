@@ -1,5 +1,6 @@
 // scripts/migrate-fe-partition.js
 /* eslint-disable no-console */
+require('dotenv').config();
 const { Client } = require('pg');
 
 function ymKey(d) {

@@ -1,12 +1,48 @@
+require('dotenv').config();
 const express = require('express');
 const path = require('path');
 const { Pool } = require('pg');
 const crypto = require('crypto');
+const { randomUUID } = require('crypto');
+const dns = require('dns');
+const pino = require('pino');
 const requireAdmin = require('./middleware/requireAdmin');
 const requireTgSecret = require('./middleware/requireTgSecret');
 const { createQueue } = require('./lib/inMemoryQueue');
 const { insertStartEvent } = require('./lib/funnel');
-const { recordStartLatency } = require('./lib/metrics');
+const { recordStartLatency, observe } = require('./lib/metricsService');
+const { saveTokenBySlug, getTokenBySlug, maskToken: maskBotToken } = require('./lib/tokenService');
+const { sendMessage: sendTelegramMessage, getQueueMetrics } = require('./lib/queuedSend');
+const { getMetrics: getSendMetrics } = require('./lib/sendService');
+const { warmUp: warmUpTelegram } = require('./lib/telegramClient');
+const queueManager = require('./lib/queueManager');
+const heartbeat = require('./lib/heartbeat');
+const { getStartMessages, prepareMessageForSend, getDefaultStartMessage } = require('./lib/botMessagesService');
+const { scheduleDownsell, scheduleDownsellsForStart, scheduleDownsellsForPix, listDownsells, cancelDownsellsOnPayment, cancelDownsellsOnExpiration } = require('./lib/downsellService');
+const downsellWorker = require('./lib/downsellWorker');
+const downsellScheduler = require('./lib/downsellScheduler');
+const shotWorker = require('./lib/shotWorker');
+
+// Logger otimizado para hot paths
+const log = pino({ level: process.env.LOG_LEVEL || 'info' });
+
+// --- Network optimizations ---
+// Priorizar IPv4 para evitar fallback demorado para IPv6
+dns.setDefaultResultOrder('ipv4first');
+
+// Configurar undici Agent global para keep-alive (Node.js 18+)
+try {
+  const { setGlobalDispatcher, Agent } = require('undici');
+  setGlobalDispatcher(new Agent({
+    connections: 100,
+    pipelining: 1,
+    keepAliveTimeout: 60_000,
+    keepAliveMaxTimeout: 120_000,
+  }));
+  console.info('[NETWORK] undici global dispatcher configurado');
+} catch (err) {
+  console.warn('[NETWORK] undici não disponível, usando fetch padrão');
+}
 
 // --- Postgres minimal ---
 let pgPool = null;
@@ -20,9 +56,10 @@ async function getPgPool() {
   }
   pgPool = new Pool({
     connectionString: url,
-    max: 5,
+    max: 12,
+    maxUses: 1000,
     idleTimeoutMillis: 30_000,
-    // Render Postgres geralmente exige SSL
+    connectionTimeoutMillis: 5_000,
     ssl: { rejectUnauthorized: false }
   });
   // sanity ping
@@ -59,8 +96,13 @@ ALTER TABLE public.bots ADD COLUMN IF NOT EXISTS use_album   boolean;
 ALTER TABLE public.bots ADD COLUMN IF NOT EXISTS token       text;
 ALTER TABLE public.bots ADD COLUMN IF NOT EXISTS created_at  timestamptz;
 
--- Coluna legada (alguns ambientes têm token_encrypted NOT NULL)
-ALTER TABLE public.bots ADD COLUMN IF NOT EXISTS token_encrypted bytea;
+-- Colunas para token criptografado (AES-GCM)
+ALTER TABLE public.bots ADD COLUMN IF NOT EXISTS token_encrypted text;
+ALTER TABLE public.bots ADD COLUMN IF NOT EXISTS token_iv        text;
+ALTER TABLE public.bots ADD COLUMN IF NOT EXISTS token_updated_at timestamptz;
+
+-- Coluna para soft delete
+ALTER TABLE public.bots ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
 
 -- Defaults leves
 ALTER TABLE public.bots ALTER COLUMN use_album  SET DEFAULT false;
@@ -69,24 +111,50 @@ UPDATE public.bots SET use_album = false WHERE use_album IS NULL;
 ALTER TABLE public.bots ALTER COLUMN created_at SET DEFAULT now();
 UPDATE public.bots SET created_at = now() WHERE created_at IS NULL;
 
--- Se token_encrypted existir e for NOT NULL, relaxa a restrição (token é opcional no blueprint)
-DO $$
-DECLARE nn boolean;
-BEGIN
-  SELECT (c.is_nullable = 'NO') INTO nn
-  FROM information_schema.columns c
-  WHERE c.table_schema='public' AND c.table_name='bots' AND c.column_name='token_encrypted';
-  IF nn IS TRUE THEN
-    EXECUTE 'ALTER TABLE public.bots ALTER COLUMN token_encrypted DROP NOT NULL';
-  END IF;
-END $$;
-
 -- Índice único em slug
 CREATE UNIQUE INDEX IF NOT EXISTS ux_bots_slug ON public.bots(slug);
 
 COMMIT;`;
   await pool.query(sql);
   console.info('[DB][MIGRATION][BOTS] ok (compat token_encrypted)');
+  return true;
+}
+
+/** Migração segura e idempotente da tabela gateway_events */
+async function ensureGatewayEventsTable() {
+  const pool = await getPgPool();
+  if (!pool) return false;
+
+  const sql = `
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '120s';
+
+-- Tabela de eventos de gateway (envios)
+CREATE TABLE IF NOT EXISTS public.gateway_events (
+  id bigserial PRIMARY KEY,
+  request_id text NOT NULL,
+  slug text NOT NULL,
+  chat_id text NOT NULL,
+  message_id bigint,
+  status text NOT NULL,
+  lat_ms integer,
+  purpose text NOT NULL,
+  dedupe_key text NOT NULL,
+  error_code text,
+  occurred_at timestamptz DEFAULT now()
+);
+
+-- Índice único para deduplicação
+CREATE UNIQUE INDEX IF NOT EXISTS ux_gateway_events_dedupe ON public.gateway_events(dedupe_key);
+
+-- Índices para consultas
+CREATE INDEX IF NOT EXISTS ix_gateway_events_slug_purpose ON public.gateway_events(slug, purpose);
+CREATE INDEX IF NOT EXISTS ix_gateway_events_occurred_at ON public.gateway_events(occurred_at DESC);
+
+COMMIT;`;
+  await pool.query(sql);
+  console.info('[DB][MIGRATION][GATEWAY_EVENTS] ok');
   return true;
 }
 
@@ -104,12 +172,28 @@ function maskToken(t) {
   const s = String(t);
   return s.length <= 6 ? '***' : `${s.slice(0,3)}***${s.slice(-3)}`;
 }
-function getPublicBaseUrl(req) {
-  const fromEnv = process.env.PUBLIC_BASE_URL && process.env.PUBLIC_BASE_URL.trim();
-  if (fromEnv) return fromEnv.replace(/\/+$/, '');
-  const proto = (req.headers['x-forwarded-proto'] || req.protocol || 'http');
-  const host = req.headers['x-forwarded-host'] || req.get('host');
+
+// Helpers para respeitar X-Forwarded-* do ngrok/reverse proxies
+function forwardedProto(req) {
+  // ex: "https" ou "https, http" -> pega o primeiro
+  const p = (req.get('x-forwarded-proto') || req.protocol || 'http').split(',')[0].trim();
+  return p;
+}
+
+function forwardedHost(req) {
+  return (req.get('x-forwarded-host') || req.get('host'));
+}
+
+function getPublicBase(req) {
+  if (process.env.PUBLIC_BASE_URL) return process.env.PUBLIC_BASE_URL.replace(/\/+$/, '');
+  const proto = forwardedProto(req);
+  const host = forwardedHost(req);
   return `${proto}://${host}`;
+}
+
+// Alias para compatibilidade com código existente
+function getPublicBaseUrl(req) {
+  return getPublicBase(req);
 }
 async function botsHasColumn(col) {
   const pool = await getPgPool();
@@ -148,6 +232,7 @@ function validateBotPayload(body) {
 }
 
 const app = express();
+app.set('trust proxy', true); // Para ngrok e X-Forwarded-* headers
 const PORT = process.env.PORT || 3000;
 const publicDirectory = path.join(__dirname, 'public');
 
@@ -166,6 +251,9 @@ if (process.env.ENABLE_BOOT_MIGRATION === 'true') {
   ensureBotsTable().catch(err => {
     console.error('[DB][MIGRATION][BOTS] erro', err?.message);
   });
+  ensureGatewayEventsTable().catch(err => {
+    console.error('[DB][MIGRATION][GATEWAY_EVENTS] erro', err?.message);
+  });
 }
 
 // gerador simples de request_id
@@ -173,35 +261,21 @@ function rid() {
   return crypto.randomUUID ? crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2,8)}`;
 }
 
-// worker assíncrono (por enquanto só loga)
-const webhookQueue = createQueue(async (job) => {
+/**
+ * Processa update do webhook de forma assíncrona
+ */
+async function processUpdate({ slug, update, request_id, received_at }) {
   const t0 = Date.now();
-  // Simular parsing/roteamento leve
-  const { slug, update, request_id, received_at, t_ack } = job;
+  const start_enqueue_ms = t0 - received_at;
   const chatId = update?.message?.chat?.id || update?.callback_query?.message?.chat?.id || null;
   const kind = update?.message ? 'message' : update?.callback_query ? 'callback_query' : 'other';
 
-  // Aqui no futuro: publicar Outbox, gravar st:/co: etc.
-  console.info('[WEBHOOK:PROCESS]', { request_id, slug, kind, chatId, age_ms: Date.now() - received_at });
-
-  // trabalho "rápido"
-  await Promise.resolve();
+  log.info({ request_id, slug, kind, chatId, start_enqueue_ms }, '[WEBHOOK:PROCESS]');
 
   try {
     const msg = update && update.message;
     const text = (msg && typeof msg.text === 'string') ? msg.text.trim() : '';
     const messageChatId = msg && msg.chat && msg.chat.id ? String(msg.chat.id) : null;
-    let latencyRecorded = false;
-
-    const ensureStartLatency = () => {
-      if (latencyRecorded || !t_ack) return;
-      try {
-        recordStartLatency(slug, Date.now() - t_ack);
-        latencyRecorded = true;
-      } catch (err) {
-        console.error('[METRIC][START][ERR]', err?.message || err);
-      }
-    };
 
     if (!pgPool) {
       try {
@@ -211,45 +285,172 @@ const webhookQueue = createQueue(async (job) => {
       }
     }
 
-    // 1) Detecta /start e grava st: direto na partição
+    // Detecta /start - SEM DEDUPE (sempre enviar)
     if (messageChatId && (text === '/start' || text.toLowerCase() === 'start' || text.startsWith('/start '))) {
+      const enqueueStart = Date.now();
+      
       try {
-        await insertStartEvent(pgPool, { slug, tg_id: messageChatId, occurredAt: new Date() });
+        // Enviar mensagens configuradas (prioridade máxima)
+        if (pgPool) {
+          const startSessionId = `${messageChatId}_${Date.now()}`;
+          
+          // 1. Verificar se há mensagem personalizada simples (start_message)
+          const { getStartMessage } = require('./lib/startMessageService');
+          const startMessageConfig = await getStartMessage(pgPool, slug);
+          
+          let messages = [];
+          
+          if (startMessageConfig.active && startMessageConfig.message) {
+            // Usar mensagem personalizada simples
+            console.info('[START][USING_CUSTOM_MESSAGE]', { slug });
+            observe('start_config_used_total', 1, { bot: slug, active: true });
+            messages = [{
+              message_type: 'text',
+              content: startMessageConfig.message
+            }];
+          } else {
+            // Registrar uso de fallback
+            observe('start_config_used_total', 1, { bot: slug, active: false });
+            // 2. Fallback: buscar mensagens configuradas antigas (bot_messages)
+            try {
+              messages = await getStartMessages(pgPool, slug);
+            } catch (err) {
+              console.warn('[START][GET_MESSAGES][ERR]', { slug, error: err.message });
+            }
+            
+            // 3. Se não houver nenhuma configuração, usar fallback padrão
+            if (messages.length === 0) {
+              console.warn('[START][NO_MESSAGES_CONFIGURED]', { slug });
+              messages = [getDefaultStartMessage()];
+            }
+          }
+          
+          // Enviar primeira mensagem e medir latência
+          const sendStart = Date.now();
+          let firstMessageSent = false;
+          
+          for (let i = 0; i < messages.length; i++) {
+            const message = prepareMessageForSend(messages[i]);
+            
+            const result = await sendTelegramMessage(pgPool, {
+              slug,
+              chat_id: messageChatId,
+              text: message.text || '',
+              parse_mode: message.parse_mode || 'MarkdownV2',
+              disable_web_page_preview: message.disable_web_page_preview !== false,
+              purpose: 'start',
+              request_id: `start_${request_id}_${i}`,
+              start_session_id: startSessionId,
+              raw: message.raw || false
+            });
+            
+            if (result.ok) {
+              console.info('[START][SEND][OK]', {
+                slug,
+                chat_id: messageChatId,
+                message_id: result.message_id,
+                sequence: i + 1,
+                lat_ms: result.lat_ms,
+                telegram_http_ms: result.telegram_lat_ms,
+                queue_wait_ms: result.queue_wait_ms || 0
+              });
+              
+              // Registrar métrica de latência apenas da primeira mensagem
+              if (!firstMessageSent) {
+                const totalLatency = Date.now() - sendStart;
+                recordStartLatency(slug, totalLatency);
+                observe('start_first_send_latency_ms', totalLatency, { bot: slug });
+                firstMessageSent = true;
+              }
+            } else {
+              console.error('[START][SEND][ERR]', {
+                slug,
+                chat_id: messageChatId,
+                sequence: i + 1,
+                error: result.error,
+                description: result.description
+              });
+            }
+            
+            // Pequeno delay entre mensagens (se houver múltiplas)
+            if (i < messages.length - 1) {
+              await new Promise(resolve => setTimeout(resolve, 300));
+            }
+          }
+          
+          // Agendar downsells ativos após /start (em background)
+          setImmediate(async () => {
+            try {
+              const scheduled = await scheduleDownsellsForStart(pgPool, {
+                bot_slug: slug,
+                telegram_id: parseInt(messageChatId, 10),
+                correlation_id: request_id,
+                now: new Date()
+              });
+              
+              if (scheduled > 0) {
+                console.info('[START][DOWNSELLS_SCHEDULED]', { slug, count: scheduled });
+              }
+            } catch (err) {
+              console.error('[START][SCHEDULE_DOWNSELL][ERR]', { slug, error: err.message });
+            }
+          });
+        }
+        
+        // Gravar evento de funil (não bloqueia envio) - em background
+        setImmediate(() => {
+          insertStartEvent(pgPool, { slug, tg_id: messageChatId, occurredAt: new Date() })
+            .then(funnelResult => {
+              const funnel_insert_ms = Date.now() - enqueueStart;
+              observe('start_funnel_insert_ms', funnel_insert_ms, { bot: slug });
+              console.debug('[START][FUNNEL][OK]', {
+                slug,
+                chat_id: messageChatId,
+                event_id: funnelResult.event_id,
+                dedup: funnelResult.dedup,
+                funnel_insert_ms
+              });
+            })
+            .catch(e => {
+              console.error('[FUNNEL][START][ERR]', { slug, chatId: messageChatId, err: e?.message });
+            });
+        });
       } catch (e) {
-        console.error('[FUNNEL][START][ERR]', { slug, chatId: messageChatId, err: e?.message });
+        console.error('[START][ERR]', { slug, chatId: messageChatId, err: e?.message });
       }
     }
-
-    // 2) (Se existir 1º envio real, posicione a métrica logo após o sendMessage)
-    //    Exemplo com envio real (ajuste para sua função):
-    //    const sent = await telegramSendMessage(botToken, chatId, texto, opts);
-    //    if (sent) ensureStartLatency();
-
-    // Fallback (mantém): se não houver envio implementado ainda, mede antes do DONE
-    ensureStartLatency();
   } catch (err) {
     console.error('[WEBHOOK][PROCESS][ERR]', err?.message || err);
   }
 
-  console.info('[WEBHOOK:DONE]', { request_id, slug, took_ms: Date.now() - t0 });
-}, { name: 'webhook' });
+  const done_ms = Date.now() - t0;
+  observe('webhook_done_ms', done_ms, { bot: slug });
+  console.info('[WEBHOOK:DONE]', { request_id, slug, done_ms });
+}
 
-// rota do webhook — ACK imediato
+// rota do webhook — Fast-path com ACK imediato (SEM async)
 app.post('/tg/:slug/webhook', requireTgSecret, (req, res) => {
-  const request_id = rid();
-  const received_at = Date.now();
+  const started = Date.now();
+  const request_id = randomUUID();
   const slug = (req.params.slug || '').trim();
-  const update = req.body || {};
+  const update = req.body;
 
-  // Logs mínimos (sem conteúdo sensível)
-  console.info('[WEBHOOK:ACK]', { request_id, slug, has_update: !!update && Object.keys(update).length > 0 });
+  // ACK IMEDIATO (fast-path) - ANTES de qualquer I/O (sem JSON para ser mais rápido)
+  res.status(200).end();
+  
+  // Métrica de ACK (deve ser ~1-5ms)
+  const ack_ms = Date.now() - started;
+  observe('webhook_ack_ms', ack_ms, { bot: slug });
+  log.info({ request_id, slug, ack_ms }, '[WEBHOOK][ACK_MS]');
 
-  // Enfileira para processamento assíncrono
-  const t_ack = Date.now();
-  webhookQueue.push({ request_id, received_at, slug, update, t_ack });
-
-  // ACK IMEDIATO
-  res.status(200).json({ ok: true });
+  // Processar em background com setImmediate (não bloqueia event loop)
+  setImmediate(async () => {
+    try {
+      await processUpdate({ slug, update, request_id, received_at: started });
+    } catch (err) {
+      log.error({ request_id, slug, err: String(err) }, '[WEBHOOK][BG_ERR]');
+    }
+  });
 });
 
 // Lista bots (protegido por token Admin)
@@ -261,17 +462,12 @@ app.get('/api/admin/bots', requireAdmin, async (req, res) => {
   try {
     let list = [];
     if (pool) {
-      const hasEnc = await botsHasColumn('token_encrypted');
-      const sel = hasEnc
-        ? `SELECT name, slug, provider, use_album,
-                  ( (token IS NOT NULL) OR (token_encrypted IS NOT NULL) ) AS has_token,
+      const sel = `SELECT name, slug, provider, use_album,
+                  (token_encrypted IS NOT NULL AND token_iv IS NOT NULL) AS has_token,
+                  token_updated_at,
                   created_at
              FROM public.bots
-             ORDER BY created_at DESC`
-        : `SELECT name, slug, provider, use_album,
-                  (token IS NOT NULL) AS has_token,
-                  created_at
-             FROM public.bots
+             WHERE deleted_at IS NULL
              ORDER BY created_at DESC`;
 
       const { rows } = await pool.query(sel);
@@ -281,6 +477,7 @@ app.get('/api/admin/bots', requireAdmin, async (req, res) => {
         provider: r.provider || 'unknown',
         use_album: r.use_album,
         has_token: r.has_token,
+        token_updated_at: r.token_updated_at,
         rate_per_minute: IMMUTABLE_DEFAULTS.rate_per_minute,
         sandbox:          IMMUTABLE_DEFAULTS.sandbox,
         renderer:         IMMUTABLE_DEFAULTS.renderer,
@@ -316,7 +513,7 @@ app.get('/api/admin/bots', requireAdmin, async (req, res) => {
 });
 
 // Cria bot (protegido por token Admin) + defaults imutáveis
-app.post('/api/admin/bots', requireAdmin, express.json(), async (req, res) => {
+app.post('/api/admin/bots', requireAdmin, async (req, res) => {
   const request_id = genReqId();
   const { errors, name, slug, provider, use_album, token } = validateBotPayload(req.body || {});
   if (errors.length) {
@@ -420,6 +617,900 @@ app.post('/api/admin/bots', requireAdmin, express.json(), async (req, res) => {
   }
 });
 
+// Endpoint: Salvar token criptografado de um bot
+app.put('/api/admin/bots/:slug/token', requireAdmin, async (req, res) => {
+  const request_id = genReqId();
+  const slug = (req.params.slug || '').trim();
+  const token = typeof req.body?.token === 'string' ? req.body.token.trim() : '';
+
+  if (!slug) {
+    console.warn('[ADMIN_BOT_TOKEN][PUT][INVALID]', { request_id, error: 'MISSING_SLUG' });
+    return res.status(400).json({ ok: false, error: 'MISSING_SLUG' });
+  }
+
+  if (!token) {
+    console.warn('[ADMIN_BOT_TOKEN][PUT][INVALID]', { request_id, slug, error: 'MISSING_TOKEN' });
+    return res.status(400).json({ ok: false, error: 'MISSING_TOKEN' });
+  }
+
+  const pool = await getPgPool();
+  if (!pool) {
+    console.error('[ADMIN_BOT_TOKEN][PUT][ERR]', { request_id, slug, error: 'DATABASE_NOT_AVAILABLE' });
+    return res.status(503).json({ ok: false, error: 'DATABASE_NOT_AVAILABLE' });
+  }
+
+  try {
+    const result = await saveTokenBySlug(pool, slug, token);
+    console.info('[ADMIN_BOT_TOKEN][PUT][OK]', {
+      request_id,
+      slug,
+      token_masked: result.token_masked,
+      token_updated_at: result.token_updated_at
+    });
+    
+    // Warm-up e iniciar heartbeat (não bloqueia resposta)
+    setImmediate(() => {
+      warmUpTelegram(token).catch(err => {
+        console.warn('[WARMUP][AFTER_TOKEN_SAVE]', { slug, error: err.message });
+      });
+      
+      // Iniciar heartbeat HTTP para este bot
+      heartbeat.startHttpHeartbeat(slug, token);
+    });
+    
+    return res.json(result);
+  } catch (err) {
+    const errorCode = err.message || 'SAVE_FAILED';
+    console.error('[ADMIN_BOT_TOKEN][PUT][ERR]', {
+      request_id,
+      slug,
+      error: errorCode,
+      message: err.message
+    });
+    
+    if (errorCode === 'ENCRYPTION_KEY_NOT_SET') {
+      return res.status(500).json({ ok: false, error: 'ENCRYPTION_KEY_NOT_SET' });
+    }
+    if (errorCode === 'BOT_NOT_FOUND') {
+      return res.status(404).json({ ok: false, error: 'BOT_NOT_FOUND' });
+    }
+    return res.status(500).json({ ok: false, error: errorCode });
+  }
+});
+
+// Endpoint: Validar token do bot via API do Telegram
+app.get('/api/admin/bots/:slug/token/status', requireAdmin, async (req, res) => {
+  const request_id = genReqId();
+  const slug = (req.params.slug || '').trim();
+
+  if (!slug) {
+    console.warn('[ADMIN_BOT_TOKEN][STATUS][INVALID]', { request_id, error: 'MISSING_SLUG' });
+    return res.status(400).json({ ok: false, error: 'MISSING_SLUG' });
+  }
+
+  const pool = await getPgPool();
+  if (!pool) {
+    console.error('[ADMIN_BOT_TOKEN][STATUS][ERR]', { request_id, slug, error: 'DATABASE_NOT_AVAILABLE' });
+    return res.status(503).json({ ok: false, error: 'DATABASE_NOT_AVAILABLE' });
+  }
+
+  try {
+    const token = await getTokenBySlug(pool, slug);
+    
+    if (!token) {
+      console.warn('[ADMIN_BOT_TOKEN][STATUS][NO_TOKEN]', { request_id, slug });
+      return res.json({ ok: false, error: 'NO_TOKEN_CONFIGURED' });
+    }
+
+    // Validar token via API do Telegram
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    const url = `https://api.telegram.org/bot${encodeURIComponent(token)}/getMe`;
+
+    try {
+      const response = await fetch(url, { signal: controller.signal });
+      clearTimeout(timeout);
+      const data = await response.json().catch(() => ({}));
+
+      if (data && data.ok) {
+        const { id, username, can_join_groups, can_read_all_group_messages } = data.result || {};
+        console.info('[ADMIN_BOT_TOKEN][STATUS][OK]', {
+          request_id,
+          slug,
+          bot_id: id,
+          username
+        });
+        return res.json({
+          ok: true,
+          bot_id: id,
+          username,
+          can_join_groups,
+          can_read_all_group_messages
+        });
+      }
+
+      const reason = (data && (data.description || data.error)) || 'INVALID_TOKEN';
+      console.warn('[ADMIN_BOT_TOKEN][STATUS][TELEGRAM_ERROR]', {
+        request_id,
+        slug,
+        error: reason
+      });
+      return res.json({ ok: false, error: reason });
+    } catch (error) {
+      clearTimeout(timeout);
+      const message = error && error.name === 'AbortError' ? 'TIMEOUT' : 'NETWORK_ERROR';
+      console.error('[ADMIN_BOT_TOKEN][STATUS][FETCH_ERR]', {
+        request_id,
+        slug,
+        error: message
+      });
+      return res.json({ ok: false, error: 'TELEGRAM_GETME_FAILED', details: message });
+    }
+  } catch (err) {
+    const errorCode = err.message || 'STATUS_FAILED';
+    console.error('[ADMIN_BOT_TOKEN][STATUS][ERR]', {
+      request_id,
+      slug,
+      error: errorCode
+    });
+    
+    if (errorCode === 'BOT_NOT_FOUND') {
+      return res.status(404).json({ ok: false, error: 'BOT_NOT_FOUND' });
+    }
+    if (errorCode === 'ENCRYPTION_KEY_NOT_SET') {
+      return res.status(500).json({ ok: false, error: 'ENCRYPTION_KEY_NOT_SET' });
+    }
+    return res.status(500).json({ ok: false, error: errorCode });
+  }
+});
+
+// Endpoint: Obter detalhes de um bot específico
+app.get('/api/admin/bots/:slug', requireAdmin, async (req, res) => {
+  const request_id = genReqId();
+  const slug = (req.params.slug || '').trim();
+  const publicBase = getPublicBaseUrl(req);
+
+  if (!slug) {
+    console.warn('[ADMIN_BOT][GET][INVALID]', { request_id, error: 'MISSING_SLUG' });
+    return res.status(400).json({ ok: false, error: 'MISSING_SLUG' });
+  }
+
+  const pool = await getPgPool();
+
+  try {
+    if (pool) {
+      const query = `
+        SELECT name, slug, provider, use_album,
+               (token_encrypted IS NOT NULL AND token_iv IS NOT NULL) AS has_token,
+               token_updated_at,
+               created_at,
+               deleted_at
+        FROM public.bots
+        WHERE slug = $1
+      `;
+      const result = await pool.query(query, [slug]);
+
+      if (result.rowCount === 0) {
+        console.warn('[ADMIN_BOT][GET][NOT_FOUND]', { request_id, slug });
+        return res.status(404).json({ ok: false, error: 'BOT_NOT_FOUND' });
+      }
+
+      const row = result.rows[0];
+      
+      // Verificar se bot foi deletado
+      if (row.deleted_at) {
+        console.warn('[ADMIN_BOT][GET][DELETED]', { request_id, slug, deleted_at: row.deleted_at });
+        return res.status(410).json({ ok: false, error: 'BOT_DELETED' });
+      }
+      
+      const bot = {
+        name: row.name,
+        slug: row.slug,
+        provider: row.provider || 'unknown',
+        use_album: row.use_album,
+        has_token: row.has_token,
+        token_updated_at: row.token_updated_at,
+        token_masked: row.has_token ? '***configured***' : null,
+        rate_per_minute: IMMUTABLE_DEFAULTS.rate_per_minute,
+        sandbox: IMMUTABLE_DEFAULTS.sandbox,
+        renderer: IMMUTABLE_DEFAULTS.renderer,
+        typing_delay_ms: IMMUTABLE_DEFAULTS.typing_delay_ms,
+        watermark: IMMUTABLE_DEFAULTS.watermark,
+        webhook_url: `${publicBase}/tg/${encodeURIComponent(row.slug)}/webhook`,
+        created_at: row.created_at
+      };
+
+      console.info('[ADMIN_BOT][GET][OK]', { request_id, slug, has_token: bot.has_token });
+      return res.json(bot);
+    }
+
+    // Fallback memória
+    const bot = mem.bots.get(slug);
+    if (!bot) {
+      console.warn('[ADMIN_BOT][GET][NOT_FOUND]', { request_id, slug, store: 'mem' });
+      return res.status(404).json({ ok: false, error: 'BOT_NOT_FOUND' });
+    }
+
+    const { token: _omit, ...safe } = bot;
+    console.info('[ADMIN_BOT][GET][OK]', { request_id, slug, store: 'mem' });
+    return res.json({ ...safe, has_token: !!bot.token });
+  } catch (err) {
+    console.error('[ADMIN_BOT][GET][ERR]', { request_id, slug, err: err?.message });
+    return res.status(500).json({ ok: false, error: 'GET_FAILED' });
+  }
+});
+
+// Endpoint: Deletar bot (soft delete por padrão, hard delete com ?hard=1)
+app.delete('/api/admin/bots/:slug', requireAdmin, async (req, res) => {
+  const request_id = genReqId();
+  const slug = (req.params.slug || '').trim();
+  const hardDelete = req.query.hard === '1';
+
+  if (!slug) {
+    console.warn('[ADMIN_BOT][DELETE][INVALID]', { request_id, error: 'MISSING_SLUG' });
+    return res.status(400).json({ ok: false, error: 'MISSING_SLUG' });
+  }
+
+  const pool = await getPgPool();
+
+  try {
+    if (pool) {
+      if (hardDelete) {
+        // Hard delete - tentar deletar, mas pode falhar se houver referências
+        try {
+          const deleteQuery = 'DELETE FROM public.bots WHERE slug = $1 AND deleted_at IS NOT NULL RETURNING slug';
+          const result = await pool.query(deleteQuery, [slug]);
+
+          if (result.rowCount === 0) {
+            console.warn('[ADMIN_BOT][DELETE][NOT_FOUND_OR_NOT_SOFT_DELETED]', { request_id, slug });
+            return res.status(404).json({ ok: false, error: 'BOT_NOT_FOUND_OR_NOT_SOFT_DELETED' });
+          }
+
+          console.info('[ADMIN_BOT][DELETE][HARD][OK]', { request_id, slug });
+          return res.json({ ok: true, deleted: true, hard: true });
+        } catch (err) {
+          // Erro de constraint (foreign key)
+          if (err.code === '23503') {
+            console.warn('[ADMIN_BOT][DELETE][HARD][REFERENCES]', { request_id, slug });
+            return res.status(409).json({ ok: false, error: 'BOT_HAS_REFERENCES' });
+          }
+          throw err;
+        }
+      } else {
+        // Soft delete - marcar deleted_at
+        const updateQuery = `
+          UPDATE public.bots
+          SET deleted_at = now()
+          WHERE slug = $1 AND deleted_at IS NULL
+          RETURNING slug, deleted_at
+        `;
+        const result = await pool.query(updateQuery, [slug]);
+
+        if (result.rowCount === 0) {
+          console.warn('[ADMIN_BOT][DELETE][NOT_FOUND]', { request_id, slug });
+          return res.status(404).json({ ok: false, error: 'BOT_NOT_FOUND' });
+        }
+
+        const row = result.rows[0];
+        console.info('[ADMIN_BOT][DELETE][SOFT][OK]', { request_id, slug, deleted_at: row.deleted_at });
+        return res.json({ ok: true, deleted: true, soft: true, deleted_at: row.deleted_at });
+      }
+    }
+
+    // Fallback memória
+    if (!mem.bots.has(slug)) {
+      console.warn('[ADMIN_BOT][DELETE][NOT_FOUND]', { request_id, slug, store: 'mem' });
+      return res.status(404).json({ ok: false, error: 'BOT_NOT_FOUND' });
+    }
+
+    mem.bots.delete(slug);
+    console.info('[ADMIN_BOT][DELETE][OK]', { request_id, slug, store: 'mem' });
+    return res.json({ ok: true, deleted: true });
+  } catch (err) {
+    console.error('[ADMIN_BOT][DELETE][ERR]', { request_id, slug, err: err?.message });
+    return res.status(500).json({ ok: false, error: 'DELETE_FAILED' });
+  }
+});
+
+// Endpoint: Enviar mensagem de teste
+app.post('/api/admin/bots/:slug/send-test', requireAdmin, async (req, res) => {
+  const request_id = genReqId();
+  const slug = (req.params.slug || '').trim();
+  const { chat_id, text } = req.body || {};
+
+  if (!slug) {
+    console.warn('[SEND_TEST][INVALID]', { request_id, error: 'MISSING_SLUG' });
+    return res.status(400).json({ ok: false, error: 'MISSING_SLUG' });
+  }
+
+  if (!chat_id) {
+    console.warn('[SEND_TEST][INVALID]', { request_id, slug, error: 'MISSING_CHAT_ID' });
+    return res.status(400).json({ ok: false, error: 'MISSING_CHAT_ID' });
+  }
+
+  if (!text || typeof text !== 'string' || !text.trim()) {
+    console.warn('[SEND_TEST][INVALID]', { request_id, slug, error: 'MISSING_TEXT' });
+    return res.status(400).json({ ok: false, error: 'MISSING_TEXT' });
+  }
+
+  const pool = await getPgPool();
+  if (!pool) {
+    console.error('[SEND_TEST][ERR]', { request_id, slug, error: 'DATABASE_NOT_AVAILABLE' });
+    return res.status(503).json({ ok: false, error: 'DATABASE_NOT_AVAILABLE' });
+  }
+
+  try {
+    console.info('[SEND_TEST][START]', {
+      request_id,
+      slug,
+      chat_id,
+      text_len: text.length
+    });
+
+    const result = await sendTelegramMessage(pool, {
+      slug,
+      chat_id,
+      text: text.trim(),
+      purpose: 'send-test',
+      request_id
+    });
+
+    if (result.ok) {
+      console.info('[SEND_TEST][OK]', {
+        request_id,
+        slug,
+        chat_id,
+        message_id: result.message_id,
+        lat_ms: result.lat_ms,
+        dedupe_applied: result.dedupe_applied || false
+      });
+
+      return res.json({
+        ok: true,
+        message_id: result.message_id,
+        lat_ms: result.lat_ms,
+        telegram_lat_ms: result.telegram_lat_ms,
+        dedupe_applied: result.dedupe_applied || false
+      });
+    } else {
+      console.error('[SEND_TEST][ERR]', {
+        request_id,
+        slug,
+        chat_id,
+        error: result.error,
+        lat_ms: result.lat_ms
+      });
+
+      return res.status(400).json({
+        ok: false,
+        error: result.error,
+        description: result.description,
+        lat_ms: result.lat_ms
+      });
+    }
+  } catch (err) {
+    console.error('[SEND_TEST][EXCEPTION]', {
+      request_id,
+      slug,
+      chat_id,
+      error: err.message
+    });
+
+    return res.status(500).json({
+      ok: false,
+      error: 'INTERNAL_ERROR',
+      description: err.message
+    });
+  }
+});
+
+// ========== ENDPOINTS DE MENSAGENS DO /START ==========
+
+// Listar mensagens do /start de um bot
+app.get('/api/admin/bots/:slug/messages', requireAdmin, async (req, res) => {
+  const request_id = genReqId();
+  const slug = (req.params.slug || '').trim();
+  
+  if (!slug) {
+    return res.status(400).json({ ok: false, error: 'MISSING_SLUG' });
+  }
+  
+  const pool = await getPgPool();
+  if (!pool) {
+    return res.status(503).json({ ok: false, error: 'DATABASE_NOT_AVAILABLE' });
+  }
+  
+  try {
+    const messages = await getStartMessages(pool, slug);
+    console.info('[ADMIN][MESSAGES][LIST]', { request_id, slug, count: messages.length });
+    return res.json({ ok: true, messages });
+  } catch (err) {
+    console.error('[ADMIN][MESSAGES][LIST][ERR]', { request_id, slug, error: err.message });
+    return res.status(500).json({ ok: false, error: 'LIST_FAILED' });
+  }
+});
+
+// Criar/atualizar mensagem do /start
+app.post('/api/admin/bots/:slug/messages', requireAdmin, async (req, res) => {
+  const request_id = genReqId();
+  const slug = (req.params.slug || '').trim();
+  const { sequence_order, message_type, content, active } = req.body || {};
+  
+  if (!slug) {
+    return res.status(400).json({ ok: false, error: 'MISSING_SLUG' });
+  }
+  
+  const pool = await getPgPool();
+  if (!pool) {
+    return res.status(503).json({ ok: false, error: 'DATABASE_NOT_AVAILABLE' });
+  }
+  
+  try {
+    const { upsertStartMessage } = require('./lib/botMessagesService');
+    const message = await upsertStartMessage(pool, {
+      slug,
+      sequence_order,
+      message_type,
+      content,
+      active
+    });
+    
+    console.info('[ADMIN][MESSAGES][CREATE]', { request_id, slug, message_id: message.id });
+    return res.status(201).json({ ok: true, message });
+  } catch (err) {
+    console.error('[ADMIN][MESSAGES][CREATE][ERR]', { request_id, slug, error: err.message });
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ========== ENDPOINTS DE MENSAGEM INICIAL DO /START (SIMPLES) ==========
+
+const startMessageService = require('./lib/startMessageService');
+
+// GET /api/admin/bots/:slug/start-message - Obter mensagem inicial
+app.get('/api/admin/bots/:slug/start-message', requireAdmin, async (req, res) => {
+  const request_id = genReqId();
+  const slug = (req.params.slug || '').trim();
+
+  if (!slug) {
+    return res.status(400).json({ ok: false, error: 'SLUG_REQUIRED' });
+  }
+
+  try {
+    const pool = await getPgPool();
+    const data = await startMessageService.getStartMessage(pool, slug);
+    console.info('[ADMIN][START_MESSAGE][GET]', { request_id, slug, active: data.active });
+    return res.json({ ok: true, ...data });
+  } catch (err) {
+    console.error('[ADMIN][START_MESSAGE][GET][ERR]', { request_id, slug, error: err.message });
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// PUT /api/admin/bots/:slug/start-message - Salvar mensagem inicial
+app.put('/api/admin/bots/:slug/start-message', requireAdmin, async (req, res) => {
+  const request_id = genReqId();
+  const slug = (req.params.slug || '').trim();
+  const { active, message } = req.body || {};
+
+  if (!slug) {
+    return res.status(400).json({ ok: false, error: 'SLUG_REQUIRED' });
+  }
+
+  try {
+    const pool = await getPgPool();
+    const data = await startMessageService.saveStartMessage(pool, slug, { active, message });
+    console.info('[ADMIN][START_MESSAGE][SAVE]', { request_id, slug, active: data.active });
+    return res.json({ ok: true, ...data });
+  } catch (err) {
+    console.error('[ADMIN][START_MESSAGE][SAVE][ERR]', { request_id, slug, error: err.message });
+    
+    // Erros específicos
+    if (err.message === 'MESSAGE_REQUIRED_WHEN_ACTIVE') {
+      return res.status(400).json({ ok: false, error: 'MESSAGE_REQUIRED_WHEN_ACTIVE' });
+    }
+    if (err.message === 'MESSAGE_TEXT_REQUIRED') {
+      return res.status(400).json({ ok: false, error: 'MESSAGE_TEXT_REQUIRED' });
+    }
+    if (err.message === 'MESSAGE_TEXT_TOO_LONG') {
+      return res.status(400).json({ ok: false, error: 'MESSAGE_TEXT_TOO_LONG' });
+    }
+    if (err.message === 'ONLY_MARKDOWNV2_SUPPORTED') {
+      return res.status(400).json({ ok: false, error: 'ONLY_MARKDOWNV2_SUPPORTED' });
+    }
+    if (err.message === 'BOT_NOT_FOUND') {
+      return res.status(404).json({ ok: false, error: 'BOT_NOT_FOUND' });
+    }
+    
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// POST /api/admin/bots/:slug/start-message:test - Testar mensagem
+app.post('/api/admin/bots/:slug/start-message:test', requireAdmin, async (req, res) => {
+  const request_id = genReqId();
+  const slug = (req.params.slug || '').trim();
+  const { chat_id, message } = req.body || {};
+
+  if (!slug) {
+    return res.status(400).json({ ok: false, error: 'SLUG_REQUIRED' });
+  }
+
+  if (!chat_id) {
+    return res.status(400).json({ ok: false, error: 'CHAT_ID_REQUIRED' });
+  }
+
+  try {
+    const pool = await getPgPool();
+    const result = await startMessageService.testStartMessage(pool, slug, chat_id, message);
+    console.info('[ADMIN][START_MESSAGE][TEST]', { request_id, slug, chat_id, ...result });
+    return res.json({ ok: true, ...result });
+  } catch (err) {
+    console.error('[ADMIN][START_MESSAGE][TEST][ERR]', { request_id, slug, chat_id, error: err.message });
+    
+    if (err.message === 'MESSAGE_TEXT_REQUIRED') {
+      return res.status(400).json({ ok: false, error: 'MESSAGE_TEXT_REQUIRED' });
+    }
+    if (err.message === 'MESSAGE_TEXT_TOO_LONG') {
+      return res.status(400).json({ ok: false, error: 'MESSAGE_TEXT_TOO_LONG' });
+    }
+    
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Registrar endpoints de downsells e disparos
+const { registerDownsellEndpoints, registerShotEndpoints } = require('./lib/adminEndpoints');
+registerDownsellEndpoints(app, requireAdmin, getPgPool);
+registerShotEndpoints(app, requireAdmin, getPgPool);
+
+// Endpoint: Obter métricas de envio (legado)
+app.get('/api/admin/metrics/send', requireAdmin, async (req, res) => {
+  try {
+    const metrics = getSendMetrics();
+    return res.json(metrics);
+  } catch (err) {
+    console.error('[METRICS][SEND][ERR]', { error: err.message });
+    return res.status(500).json({ ok: false, error: 'METRICS_FAILED' });
+  }
+});
+
+// Endpoint: Obter métricas de latência (webhook_ack_ms, telegram_http_ms, etc)
+app.get('/api/admin/metrics/latency', requireAdmin, async (req, res) => {
+  try {
+    const { getMetrics } = require('./lib/metricsService');
+    const metrics = getMetrics();
+    return res.json(metrics);
+  } catch (err) {
+    console.error('[METRICS][LATENCY][ERR]', { error: err.message });
+    return res.status(500).json({ ok: false, error: 'METRICS_FAILED' });
+  }
+});
+
+// Endpoint: Obter métricas da fila
+app.get('/api/admin/metrics/queue', requireAdmin, async (req, res) => {
+  try {
+    const queueMetrics = getQueueMetrics();
+    const heartbeatMetrics = heartbeat.getMetrics();
+    
+    return res.json({
+      queue: queueMetrics,
+      heartbeat: heartbeatMetrics
+    });
+  } catch (err) {
+    console.error('[METRICS][QUEUE][ERR]', { error: err.message });
+    return res.status(500).json({ ok: false, error: 'METRICS_FAILED' });
+  }
+});
+
+// Endpoint: Obter todas as métricas (para validação de critérios de aceite)
+app.get('/api/admin/metrics/all', requireAdmin, async (req, res) => {
+  try {
+    const { getMetrics: getLatencyMetrics } = require('./lib/metricsService');
+    const latencyMetrics = getLatencyMetrics();
+    const queueMetrics = getQueueMetrics();
+    const heartbeatMetrics = heartbeat.getMetrics();
+    const sendMetrics = getSendMetrics();
+    
+    return res.json({
+      timestamp: new Date().toISOString(),
+      webhook: latencyMetrics.webhook,
+      start: latencyMetrics.start,
+      send: {
+        ...latencyMetrics.send,
+        legacy: sendMetrics
+      },
+      queue: {
+        ...latencyMetrics.queue,
+        manager: queueMetrics
+      },
+      backoff_429: latencyMetrics.backoff_429,
+      heartbeat: {
+        ...latencyMetrics.heartbeat,
+        manager: heartbeatMetrics
+      }
+    });
+  } catch (err) {
+    console.error('[METRICS][ALL][ERR]', { error: err.message });
+    return res.status(500).json({ ok: false, error: 'METRICS_FAILED' });
+  }
+});
+
+// Endpoint: Definir webhook no Telegram
+app.post('/api/admin/bots/:slug/webhook/set', requireAdmin, async (req, res) => {
+  const request_id = genReqId();
+  const slug = (req.params.slug || '').trim();
+
+  if (!slug) {
+    console.warn('[WEBHOOK][SET][INVALID]', { request_id, error: 'MISSING_SLUG' });
+    return res.status(400).json({ ok: false, error: 'MISSING_SLUG' });
+  }
+
+  const pool = await getPgPool();
+  if (!pool) {
+    console.error('[WEBHOOK][SET][ERR]', { request_id, slug, error: 'DATABASE_NOT_AVAILABLE' });
+    return res.status(503).json({ ok: false, error: 'DATABASE_NOT_AVAILABLE' });
+  }
+
+  try {
+    // Buscar token do bot
+    const token = await getTokenBySlug(pool, slug);
+    
+    if (!token) {
+      console.warn('[WEBHOOK][SET][NO_TOKEN]', { request_id, slug });
+      return res.status(400).json({ ok: false, error: 'BOT_TOKEN_NOT_SET' });
+    }
+
+    // Preferir a URL enviada pelo front; se não vier, construir pela requisição
+    let webhookUrl = (req.body?.url || '').trim();
+    if (!webhookUrl) {
+      webhookUrl = `${getPublicBase(req)}/tg/${encodeURIComponent(slug)}/webhook`;
+    }
+
+    // Normalizar e validar HTTPS
+    webhookUrl = webhookUrl.replace(/\/+$/, ''); // sem barra final
+    if (!/^https:\/\//i.test(webhookUrl)) {
+      console.warn('[WEBHOOK][SET][HTTPS_REQUIRED]', { request_id, slug, url: webhookUrl });
+      return res.status(400).json({ ok: false, error: 'HTTPS_REQUIRED', message: 'An HTTPS URL must be provided for webhook' });
+    }
+
+    const secretToken = process.env.TELEGRAM_WEBHOOK_SECRET || '';
+
+    console.info('[WEBHOOK][SET][START]', {
+      request_id,
+      slug,
+      webhook_url: webhookUrl
+    });
+
+    // Chamar API do Telegram
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    
+    const telegramUrl = `https://api.telegram.org/bot${token}/setWebhook`;
+    const response = await fetch(telegramUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url: webhookUrl,
+        secret_token: secretToken,
+        drop_pending_updates: true
+      }),
+      signal: controller.signal
+    });
+    
+    clearTimeout(timeout);
+    
+    const data = await response.json();
+
+    if (data.ok) {
+      console.info('[WEBHOOK][SET][OK]', {
+        request_id,
+        slug,
+        webhook_url: webhookUrl
+      });
+
+      return res.json({
+        ok: true,
+        webhook_url: webhookUrl,
+        description: data.description || 'Webhook configured successfully'
+      });
+    } else {
+      console.error('[WEBHOOK][SET][TELEGRAM_ERR]', {
+        request_id,
+        slug,
+        error: data.description
+      });
+
+      return res.status(400).json({
+        ok: false,
+        error: 'TELEGRAM_ERROR',
+        description: data.description
+      });
+    }
+  } catch (err) {
+    console.error('[WEBHOOK][SET][EXCEPTION]', {
+      request_id,
+      slug,
+      error: err.message
+    });
+
+    return res.status(500).json({
+      ok: false,
+      error: 'INTERNAL_ERROR',
+      description: err.message
+    });
+  }
+});
+
+// Endpoint: Remover webhook no Telegram
+app.post('/api/admin/bots/:slug/webhook/delete', requireAdmin, async (req, res) => {
+  const request_id = genReqId();
+  const slug = (req.params.slug || '').trim();
+
+  if (!slug) {
+    console.warn('[WEBHOOK][DELETE][INVALID]', { request_id, error: 'MISSING_SLUG' });
+    return res.status(400).json({ ok: false, error: 'MISSING_SLUG' });
+  }
+
+  const pool = await getPgPool();
+  if (!pool) {
+    console.error('[WEBHOOK][DELETE][ERR]', { request_id, slug, error: 'DATABASE_NOT_AVAILABLE' });
+    return res.status(503).json({ ok: false, error: 'DATABASE_NOT_AVAILABLE' });
+  }
+
+  try {
+    // Buscar token do bot
+    const token = await getTokenBySlug(pool, slug);
+    
+    if (!token) {
+      console.warn('[WEBHOOK][DELETE][NO_TOKEN]', { request_id, slug });
+      return res.status(400).json({ ok: false, error: 'BOT_TOKEN_NOT_SET' });
+    }
+
+    console.info('[WEBHOOK][DELETE][START]', { request_id, slug });
+
+    // Chamar API do Telegram
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    
+    const telegramUrl = `https://api.telegram.org/bot${token}/deleteWebhook`;
+    const response = await fetch(telegramUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        drop_pending_updates: true
+      }),
+      signal: controller.signal
+    });
+    
+    clearTimeout(timeout);
+    
+    const data = await response.json();
+
+    if (data.ok) {
+      console.info('[WEBHOOK][DELETE][OK]', { request_id, slug });
+
+      return res.json({
+        ok: true,
+        description: data.description || 'Webhook removed successfully'
+      });
+    } else {
+      console.error('[WEBHOOK][DELETE][TELEGRAM_ERR]', {
+        request_id,
+        slug,
+        error: data.description
+      });
+
+      return res.status(400).json({
+        ok: false,
+        error: 'TELEGRAM_ERROR',
+        description: data.description
+      });
+    }
+  } catch (err) {
+    console.error('[WEBHOOK][DELETE][EXCEPTION]', {
+      request_id,
+      slug,
+      error: err.message
+    });
+
+    return res.status(500).json({
+      ok: false,
+      error: 'INTERNAL_ERROR',
+      description: err.message
+    });
+  }
+});
+
+// Endpoint: Ver status do webhook no Telegram
+app.get('/api/admin/bots/:slug/webhook/status', requireAdmin, async (req, res) => {
+  const request_id = genReqId();
+  const slug = (req.params.slug || '').trim();
+
+  if (!slug) {
+    console.warn('[WEBHOOK][STATUS][INVALID]', { request_id, error: 'MISSING_SLUG' });
+    return res.status(400).json({ ok: false, error: 'MISSING_SLUG' });
+  }
+
+  const pool = await getPgPool();
+  if (!pool) {
+    console.error('[WEBHOOK][STATUS][ERR]', { request_id, slug, error: 'DATABASE_NOT_AVAILABLE' });
+    return res.status(503).json({ ok: false, error: 'DATABASE_NOT_AVAILABLE' });
+  }
+
+  try {
+    // Buscar token do bot
+    const token = await getTokenBySlug(pool, slug);
+    
+    if (!token) {
+      console.warn('[WEBHOOK][STATUS][NO_TOKEN]', { request_id, slug });
+      return res.status(400).json({ ok: false, error: 'BOT_TOKEN_NOT_SET' });
+    }
+
+    console.info('[WEBHOOK][STATUS][START]', { request_id, slug });
+
+    // Chamar API do Telegram
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    
+    const telegramUrl = `https://api.telegram.org/bot${token}/getWebhookInfo`;
+    const response = await fetch(telegramUrl, {
+      method: 'GET',
+      signal: controller.signal
+    });
+    
+    clearTimeout(timeout);
+    
+    const data = await response.json();
+
+    if (data.ok) {
+      const info = data.result || {};
+      
+      console.info('[WEBHOOK][STATUS][OK]', {
+        request_id,
+        slug,
+        has_webhook: !!info.url,
+        pending_count: info.pending_update_count || 0
+      });
+
+      return res.json({
+        ok: true,
+        url: info.url || null,
+        has_custom_certificate: info.has_custom_certificate || false,
+        pending_update_count: info.pending_update_count || 0,
+        last_error_date: info.last_error_date || null,
+        last_error_message: info.last_error_message || null,
+        max_connections: info.max_connections || null,
+        ip_address: info.ip_address || null
+      });
+    } else {
+      console.error('[WEBHOOK][STATUS][TELEGRAM_ERR]', {
+        request_id,
+        slug,
+        error: data.description
+      });
+
+      return res.status(400).json({
+        ok: false,
+        error: 'TELEGRAM_ERROR',
+        description: data.description
+      });
+    }
+  } catch (err) {
+    console.error('[WEBHOOK][STATUS][EXCEPTION]', {
+      request_id,
+      slug,
+      error: err.message
+    });
+
+    return res.status(500).json({
+      ok: false,
+      error: 'INTERNAL_ERROR',
+      description: err.message
+    });
+  }
+});
+
 app.post('/api/telegram/validate-token', async (req, res) => {
   const token = typeof req.body?.token === 'string' ? req.body.token.trim() : '';
   if (!token) {
@@ -447,20 +1538,67 @@ app.post('/api/telegram/validate-token', async (req, res) => {
   }
 });
 
+// ========== WEBHOOKS DE PAGAMENTO (PIX) ==========
+// NOTA: Estes endpoints devem ser integrados com seu gateway de pagamento
+// Exemplo de uso:
+//
+// const paymentWebhookService = require('./lib/paymentWebhookService');
+//
+// // Webhook: PIX criado
+// app.post('/api/payment/webhook/pix-created', async (req, res) => {
+//   res.status(200).json({ ok: true }); // ACK imediato
+//   
+//   setImmediate(async () => {
+//     const pool = await getPgPool();
+//     await paymentWebhookService.handlePixCreated(pool, {
+//       bot_slug: req.body.bot_slug,
+//       telegram_id: req.body.telegram_id,
+//       transaction_id: req.body.transaction_id,
+//       correlation_id: req.body.correlation_id || genReqId()
+//     });
+//   });
+// });
+//
+// // Webhook: Pagamento aprovado
+// app.post('/api/payment/webhook/payment-approved', async (req, res) => {
+//   res.status(200).json({ ok: true }); // ACK imediato
+//   
+//   setImmediate(async () => {
+//     const pool = await getPgPool();
+//     await paymentWebhookService.handlePaymentApproved(pool, {
+//       bot_slug: req.body.bot_slug,
+//       telegram_id: req.body.telegram_id,
+//       transaction_id: req.body.transaction_id
+//     });
+//   });
+// });
+//
+// // Webhook: PIX expirado
+// app.post('/api/payment/webhook/pix-expired', async (req, res) => {
+//   res.status(200).json({ ok: true }); // ACK imediato
+//   
+//   setImmediate(async () => {
+//     const pool = await getPgPool();
+//     await paymentWebhookService.handlePixExpired(pool, {
+//       transaction_id: req.body.transaction_id
+//     });
+//   });
+// });
+// ========== FIM WEBHOOKS DE PAGAMENTO ==========
+
 app.use(express.static(publicDirectory, {
   extensions: ['html'],
   fallthrough: true
 }));
 
-app.get('/env.js', (_req, res) => {
-  const appBaseUrl = process.env.APP_BASE_URL || '';
-  const publicBaseUrl = process.env.PUBLIC_BASE_URL || '';
+app.get('/env.js', (req, res) => {
+  const base = process.env.APP_BASE_URL || `${forwardedProto(req)}://${forwardedHost(req)}`;
+  const pub = process.env.PUBLIC_BASE_URL || `${forwardedProto(req)}://${forwardedHost(req)}`;
+  const adminToken = process.env.ADMIN_API_TOKEN || '';
 
-  res.type('application/javascript');
-  res.send(`window.__ENV__ = Object.freeze({\n` +
-    `  APP_BASE_URL: ${JSON.stringify(appBaseUrl)},\n` +
-    `  PUBLIC_BASE_URL: ${JSON.stringify(publicBaseUrl)}\n` +
-    `});\n`);
+  res.set('Content-Type', 'application/javascript');
+  res.set('Cache-Control', 'no-store');
+  res.send(`window.__ENV__ = { APP_BASE_URL: '${base}', PUBLIC_BASE_URL: '${pub}', ADMIN_API_TOKEN: '${adminToken}' };`);
 });
 
 app.use((req, res, next) => {
@@ -489,6 +1627,61 @@ app.use((req, res) => {
 });
 
 const HOST = '0.0.0.0';
-app.listen(PORT, HOST, () => {
+app.listen(PORT, HOST, async () => {
   console.log(`Servidor ouvindo na porta ${PORT}`);
+  
+  // Iniciar queue manager
+  queueManager.start();
+  
+  // Garantir partição do mês atual (não bloqueia a escuta)
+  try {
+    const { spawn } = require('child_process');
+    spawn(process.execPath, ['scripts/migrate-fe-partition.js'], { stdio: 'inherit' });
+  } catch (e) {
+    console.warn('[PARTITION][WARN]', e?.message || e);
+  }
+  
+  // Iniciar heartbeats e warm-up para todos os bots
+  try {
+    const pool = await getPgPool();
+    if (pool) {
+      // Iniciar heartbeat PG
+      heartbeat.startPgHeartbeat(pool);
+      
+      // Iniciar workers de downsell e disparo
+      downsellWorker.start(pool, 10000); // 10s
+      downsellScheduler.start(pool, queueManager, 3000); // 3s
+      shotWorker.start(pool, 5000); // 5s
+      console.info('[BOOT] Workers iniciados: downsell, downsellScheduler, shot');
+      
+      const { rows } = await pool.query(`
+        SELECT slug, token_encrypted, token_iv 
+        FROM public.bots 
+        WHERE deleted_at IS NULL 
+          AND token_encrypted IS NOT NULL 
+          AND token_iv IS NOT NULL
+      `);
+      
+      console.info('[BOOT] Inicializando bots:', { bot_count: rows.length });
+      
+      for (const row of rows) {
+        try {
+          const token = await getTokenBySlug(pool, row.slug);
+          if (token) {
+            // Warm-up inicial
+            warmUpTelegram(token).catch(err => {
+              console.warn('[WARMUP][BOOT][ERR]', { slug: row.slug, error: err.message });
+            });
+            
+            // Iniciar heartbeat HTTP para este bot
+            heartbeat.startHttpHeartbeat(row.slug, token);
+          }
+        } catch (err) {
+          console.warn('[BOOT][TOKEN_ERR]', { slug: row.slug, error: err.message });
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[BOOT][FAILED]', { error: err.message });
+  }
 });

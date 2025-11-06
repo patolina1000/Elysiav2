@@ -25,6 +25,7 @@
       };
     </script>
     <link rel="stylesheet" href="./admin.css" />
+    <script src="/env.js"></script>
   </head>
   <body class="bg-surface text-zinc-100 min-h-full font-sans">
     <div id="app" class="min-h-screen pb-24">
@@ -137,13 +138,15 @@
             </div>
             <div class="grid gap-4 md:grid-cols-2">
               <div class="form-field">
-                <label class="form-label">Token do Bot (não armazenado)</label>
+                <label class="form-label">Token do Bot</label>
                 <div class="flex items-center gap-2">
-                  <input data-field="token" type="password" placeholder="cole aqui para validar" autocomplete="off" class="form-input flex-1" />
+                  <input data-field="token" type="password" placeholder="Cole o token aqui" autocomplete="off" class="form-input flex-1" />
                   <button class="btn-secondary text-xs px-3 py-2" data-action="reveal">👁</button>
+                  <button class="btn-secondary text-xs px-3 py-2" data-action="save-token">Salvar</button>
                   <button class="btn-primary text-xs px-3 py-2" data-action="validate">Validar</button>
                 </div>
-                <p class="text-xs text-zinc-400" data-field="token-status">Nunca enviamos nem salvamos este valor.</p>
+                <p class="text-xs text-zinc-400" data-field="token-status"></p>
+                <p class="text-xs text-zinc-500" data-field="token-info"></p>
               </div>
               <div class="form-field">
                 <label class="form-label">Webhook</label>
@@ -153,9 +156,66 @@
                 </div>
               </div>
             </div>
+            <div class="grid gap-4 md:grid-cols-2">
+              <div class="form-field">
+                <label class="form-label">Status do Token</label>
+                <div class="flex items-center gap-2">
+                  <span data-field="has-token-badge" class="text-sm"></span>
+                  <span data-field="token-updated-at" class="text-xs text-zinc-500"></span>
+                </div>
+              </div>
+              <div class="form-field">
+                <label class="form-label">Envio de Teste</label>
+                <div class="space-y-2">
+                  <input data-field="test-chat-id" type="text" placeholder="Chat ID (ex: 123456789)" class="form-input text-sm" />
+                  <textarea data-field="test-text" placeholder="Texto da mensagem" rows="3" class="form-input text-sm">Teste de envio ✅</textarea>
+                  <button class="btn-primary text-xs px-3 py-2" data-action="send-test">Enviar teste</button>
+                  <p class="text-xs text-zinc-400" data-field="send-test-status"></p>
+                </div>
+              </div>
+            </div>
             <p class="text-sm text-zinc-400">
               Padrões: <b>MarkdownV2</b>, <b>delay 0</b>, <b>sem watermark</b>, produção (rate <b>60 rpm</b>).
             </p>
+            
+            <!-- Seção Webhook -->
+            <div class="border-t border-zinc-700 pt-4 mt-4">
+              <h3 class="text-lg font-semibold mb-3">Gerenciar Webhook</h3>
+              <div class="space-y-3">
+                <div class="form-field">
+                  <label class="form-label">URL do Webhook (destino)</label>
+                  <input data-field="webhook-url-display" type="text" readonly class="form-input text-sm" />
+                  <p class="text-xs text-zinc-500 mt-1">⚠️ Se o ngrok reiniciar e a URL mudar, refaça "Definir Webhook"</p>
+                </div>
+                <div class="flex gap-2 flex-wrap">
+                  <button class="btn-primary text-xs px-4 py-2" data-action="webhook-set">Definir Webhook</button>
+                  <button class="btn-secondary text-xs px-4 py-2" data-action="webhook-delete">Remover Webhook</button>
+                  <button class="btn-secondary text-xs px-4 py-2" data-action="webhook-status">Ver Status</button>
+                </div>
+                <div class="rounded-lg bg-zinc-800 p-3" data-field="webhook-status-display" style="display:none;">
+                  <p class="text-xs text-zinc-300" data-field="webhook-status-text"></p>
+                </div>
+              </div>
+            </div>
+            
+            <!-- Seção Mensagem Inicial -->
+            <div class="border-t border-zinc-700 pt-4 mt-4">
+              <h3 class="text-lg font-semibold mb-3">Mensagem Inicial</h3>
+              <p class="text-sm text-zinc-400 mb-3">Configure a mensagem que será enviada quando o usuário enviar /start</p>
+              <button class="btn-primary text-xs px-4 py-2" data-action="configure-start-message" data-field="configure-start-message-btn">✎ Configurar mensagem inicial</button>
+            </div>
+            
+            <!-- Seção Downsells -->
+            <div class="border-t border-zinc-700 pt-4 mt-4">
+              <h3 class="text-lg font-semibold mb-3">Downsells</h3>
+              <p class="text-sm text-zinc-400 mb-3">Mensagens automáticas enviadas após /start ou PIX gerado (apenas se houver PIX não pago)</p>
+              <button class="btn-primary text-xs px-4 py-2" data-action="manage-downsells">⚡ Gerenciar downsells</button>
+            </div>
+            
+            <div class="border-t border-zinc-700 pt-4 mt-4">
+              <button class="btn-secondary text-xs px-4 py-2 text-red-400 hover:text-red-300" data-action="delete-bot">🗑️ Excluir Bot</button>
+              <p class="text-xs text-zinc-500 mt-2">Soft delete: o bot será desativado mas os dados permanecerão no banco.</p>
+            </div>
           </div>
         </template>
       </main>
@@ -267,6 +327,473 @@
       </div>
     </div>
 
-    <script src="./admin.js" defer></script>
+    <div id="delete-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="delete-modal-title">
+      <div class="modal-content">
+        <header class="modal-header">
+          <h2 id="delete-modal-title" class="text-lg font-semibold">Confirmar Exclusão</h2>
+          <button class="modal-close" type="button" data-close-modal="delete-modal" aria-label="Fechar">✖️</button>
+        </header>
+        <div class="space-y-4">
+          <p class="text-sm text-zinc-300">Você está prestes a excluir o bot <strong data-field="delete-bot-name"></strong> (<code data-field="delete-bot-slug"></code>).</p>
+          <p class="text-sm text-zinc-400">Esta é uma operação de <strong>soft delete</strong>. O bot será desativado e não aparecerá mais na lista, mas os dados permanecerão no banco de dados.</p>
+          <div class="form-field">
+            <label class="inline-flex items-center gap-2 text-sm">
+              <input id="delete-confirm-checkbox" type="checkbox" class="form-checkbox" />
+              <span>Entendo que o bot será desativado e removido da lista</span>
+            </label>
+          </div>
+          <div class="flex flex-col gap-3 sm:flex-row sm:justify-end">
+            <button type="button" class="btn-secondary sm:flex-1" data-close-modal="delete-modal">Cancelar</button>
+            <button type="button" id="confirm-delete-btn" class="btn-primary sm:flex-1 bg-red-600 hover:bg-red-700" disabled>Excluir Bot</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="start-message-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="start-message-modal-title">
+      <div class="modal-content" style="max-width: 600px;">
+        <header class="modal-header">
+          <h2 id="start-message-modal-title" class="text-lg font-semibold">Mensagem inicial do /start</h2>
+          <button class="modal-close" type="button" data-close-modal="start-message-modal" aria-label="Fechar">✖️</button>
+        </header>
+        <form id="start-message-form" class="space-y-4">
+          <!-- Toggle Ativar -->
+          <div class="form-field">
+            <label class="inline-flex items-center gap-2 text-sm">
+              <input id="start-message-active" type="checkbox" class="form-checkbox" />
+              <span class="font-medium">Ativar mensagem personalizada</span>
+            </label>
+            <p class="text-xs text-zinc-500 mt-1">Quando desativado, usa a mensagem padrão do sistema</p>
+          </div>
+
+          <!-- Textarea -->
+          <div class="form-field" id="start-message-text-field">
+            <label for="start-message-text" class="form-label">Texto da mensagem (MarkdownV2)</label>
+            <textarea
+              id="start-message-text"
+              rows="6"
+              maxlength="4096"
+              placeholder="Olá! Bem-vindo ao bot..."
+              class="form-input font-mono text-sm resize-y"
+              style="min-height: 150px;"
+            ></textarea>
+            <div class="flex items-center justify-between mt-1">
+              <p class="text-xs text-zinc-500">
+                <span id="start-message-char-count">0</span> / 4096 caracteres
+              </p>
+              <p class="text-xs text-zinc-500" id="start-message-updated-at"></p>
+            </div>
+          </div>
+
+          <!-- Opções -->
+          <div class="space-y-2" id="start-message-options">
+            <div class="form-field">
+              <label class="inline-flex items-center gap-2 text-sm">
+                <input id="start-message-disable-preview" type="checkbox" class="form-checkbox" />
+                <span>Desativar preview de links</span>
+              </label>
+            </div>
+            <div class="form-field">
+              <label class="inline-flex items-center gap-2 text-sm">
+                <input id="start-message-raw" type="checkbox" class="form-checkbox" />
+                <span>Texto já vem escapado (raw)</span>
+              </label>
+              <p class="text-xs text-yellow-500 mt-1 hidden" id="start-message-raw-warning">
+                ⚠️ Quando marcado, o MarkdownV2 não será escapado automaticamente
+              </p>
+            </div>
+          </div>
+
+          <!-- Teste rápido -->
+          <div class="border-t border-zinc-700 pt-4" id="start-message-test-section">
+            <h3 class="text-sm font-semibold mb-2">Teste rápido</h3>
+            <div class="flex gap-2">
+              <input
+                id="start-message-test-chat-id"
+                type="text"
+                placeholder="Chat ID"
+                class="form-input flex-1 text-sm"
+              />
+              <button type="button" id="start-message-test-btn" class="btn-secondary text-xs px-4 py-2 whitespace-nowrap">
+                Enviar teste
+              </button>
+            </div>
+            <p class="text-xs text-zinc-500 mt-1">Envia a mensagem atual sem salvar</p>
+            <div id="start-message-test-result" class="mt-2 text-xs hidden"></div>
+          </div>
+
+          <!-- Rodapé -->
+          <div class="flex flex-col gap-3 sm:flex-row sm:justify-end border-t border-zinc-700 pt-4">
+            <button type="button" class="btn-secondary sm:flex-1" data-close-modal="start-message-modal">Cancelar</button>
+            <button type="button" id="start-message-save-btn" class="btn-secondary sm:flex-1">Salvar</button>
+            <button type="submit" id="start-message-save-close-btn" class="btn-primary sm:flex-1">Salvar & Fechar</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Modal: Gerenciar Downsells -->
+    <div id="downsells-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="downsells-modal-title">
+      <div class="modal-content" style="max-width: 1000px;">
+        <header class="modal-header">
+          <h2 id="downsells-modal-title" class="text-lg font-semibold">Downsells</h2>
+          <button class="modal-close" type="button" data-close-modal="downsells-modal" aria-label="Fechar">✖️</button>
+        </header>
+        
+        <div class="space-y-4">
+          <!-- Aviso sobre regra de negócio -->
+          <div class="rounded-xl bg-blue-900/20 border border-blue-700/30 p-4">
+            <div class="flex items-start gap-3">
+              <span class="text-blue-400 text-xl">ℹ️</span>
+              <div class="flex-1">
+                <p class="text-sm text-blue-200 font-medium mb-1">Regra de envio</p>
+                <p class="text-xs text-blue-300">
+                  Downsells só são enviados se houver <strong>PIX gerado e não pago</strong> no momento do disparo.
+                  Ao pagar, <strong>todos os downsells pendentes são cancelados</strong> automaticamente.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Barra de ações -->
+          <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div class="flex-1">
+              <input
+                id="downsells-search"
+                type="text"
+                placeholder="Buscar por título ou conteúdo..."
+                class="form-input text-sm w-full"
+              />
+            </div>
+            <button id="new-downsell-btn" class="btn-primary text-sm px-4 py-2 whitespace-nowrap">
+              ➕ Novo Downsell
+            </button>
+          </div>
+
+          <!-- Lista/Tabela -->
+          <div id="downsells-list-container">
+            <!-- Loading state -->
+            <div id="downsells-loading" class="hidden py-12 text-center">
+              <div class="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-accent"></div>
+              <p class="text-sm text-zinc-400 mt-3">Carregando downsells...</p>
+            </div>
+
+            <!-- Empty state -->
+            <div id="downsells-empty" class="hidden py-12 text-center">
+              <p class="text-zinc-400 mb-3">Nenhum downsell configurado</p>
+              <button class="btn-primary text-sm px-4 py-2" data-action="new-downsell">
+                ➕ Criar primeiro downsell
+              </button>
+            </div>
+
+            <!-- Error state -->
+            <div id="downsells-error" class="hidden py-12 text-center">
+              <p class="text-red-400 mb-3">Erro ao carregar downsells</p>
+              <button class="btn-secondary text-sm px-4 py-2" data-action="retry-load-downsells">
+                🔄 Tentar novamente
+              </button>
+            </div>
+
+            <!-- Table -->
+            <div id="downsells-table-wrapper" class="hidden overflow-x-auto">
+              <table class="min-w-full divide-y divide-surfaceMuted text-sm">
+                <thead class="bg-surface">
+                  <tr>
+                    <th scope="col" class="table-head">Título</th>
+                    <th scope="col" class="table-head">Gatilhos</th>
+                    <th scope="col" class="table-head">Delay</th>
+                    <th scope="col" class="table-head">Ativo</th>
+                    <th scope="col" class="table-head">Prévia</th>
+                    <th scope="col" class="table-head">Ações</th>
+                  </tr>
+                </thead>
+                <tbody id="downsells-table-body" class="divide-y divide-surfaceMuted">
+                  <!-- Conteúdo dinâmico -->
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <div class="flex justify-between items-center border-t border-zinc-700 pt-4">
+            <p class="text-xs text-zinc-500">
+              Total: <span id="downsells-count">0</span> downsell(s)
+            </p>
+            <button type="button" class="btn-secondary" data-close-modal="downsells-modal">Fechar</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Criar/Editar Downsell -->
+    <div id="downsell-form-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="downsell-form-modal-title">
+      <div class="modal-content" style="max-width: 700px;">
+        <header class="modal-header">
+          <h2 id="downsell-form-modal-title" class="text-lg font-semibold">Novo Downsell</h2>
+          <button class="modal-close" type="button" data-close-modal="downsell-form-modal" aria-label="Fechar">✖️</button>
+        </header>
+        
+        <form id="downsell-form" class="space-y-4">
+          <!-- Título -->
+          <div class="form-field">
+            <label for="downsell-title" class="form-label">Título (opcional)</label>
+            <input
+              id="downsell-title"
+              type="text"
+              maxlength="120"
+              placeholder="Ex: Downsell 20 minutos"
+              class="form-input"
+            />
+            <p class="text-xs text-zinc-500 mt-1">
+              <span id="downsell-title-count">0</span> / 120 caracteres
+            </p>
+          </div>
+
+          <!-- Copy -->
+          <div class="form-field">
+            <label for="downsell-copy" class="form-label">
+              Texto da mensagem <span class="text-rose-400">*</span>
+            </label>
+            <textarea
+              id="downsell-copy"
+              rows="6"
+              maxlength="4096"
+              required
+              placeholder="Ainda está aí? Temos uma oferta especial para você..."
+              class="form-input font-mono text-sm resize-y"
+              style="min-height: 150px;"
+            ></textarea>
+            <div class="flex items-center justify-between mt-1">
+              <p class="text-xs text-yellow-500">
+                ⚠️ MarkdownV2 ativo. Escape caracteres especiais: _ * [ ] ( ) ~ ` > # + - = | { } . !
+              </p>
+              <p class="text-xs text-zinc-500">
+                <span id="downsell-copy-count">0</span> / 4096
+              </p>
+            </div>
+            <p class="form-hint hidden text-rose-400" data-error-for="copy"></p>
+          </div>
+
+          <!-- Mídia (opcional) -->
+          <div class="form-field">
+            <label for="downsell-media-type" class="form-label">Mídia (opcional)</label>
+            <select id="downsell-media-type" class="form-input">
+              <option value="none">Nenhuma</option>
+              <option value="photo">Foto</option>
+              <option value="video">Vídeo</option>
+            </select>
+          </div>
+
+          <div id="downsell-media-fields" class="space-y-3 hidden">
+            <div class="form-field">
+              <label for="downsell-file-id" class="form-label">File ID do Telegram</label>
+              <input
+                id="downsell-file-id"
+                type="text"
+                placeholder="AgACAgEAAxkBAAI..."
+                class="form-input"
+              />
+              <p class="text-xs text-zinc-500 mt-1">
+                Use o file_id de uma mídia já enviada no Telegram
+              </p>
+            </div>
+            <div class="form-field">
+              <label for="downsell-caption" class="form-label">Caption (MarkdownV2)</label>
+              <textarea
+                id="downsell-caption"
+                rows="3"
+                maxlength="1024"
+                placeholder="Legenda da mídia..."
+                class="form-input font-mono text-sm"
+              ></textarea>
+            </div>
+          </div>
+
+          <!-- Gatilhos -->
+          <div class="form-field">
+            <label class="form-label">Gatilhos de disparo <span class="text-rose-400">*</span></label>
+            <div class="space-y-2">
+              <label class="inline-flex items-center gap-2 text-sm">
+                <input id="downsell-after-start" type="checkbox" class="form-checkbox" />
+                <span>Disparar após /start</span>
+              </label>
+              <label class="inline-flex items-center gap-2 text-sm">
+                <input id="downsell-after-pix" type="checkbox" class="form-checkbox" />
+                <span>Disparar após PIX gerado</span>
+              </label>
+            </div>
+            <p class="form-hint hidden text-rose-400" data-error-for="triggers">
+              Selecione pelo menos um gatilho
+            </p>
+          </div>
+
+          <!-- Delay -->
+          <div class="form-field">
+            <label for="downsell-delay" class="form-label">
+              Delay (minutos) <span class="text-rose-400">*</span>
+            </label>
+            <input
+              id="downsell-delay"
+              type="number"
+              min="0"
+              step="1"
+              required
+              value="20"
+              class="form-input"
+            />
+            <p class="text-xs text-zinc-500 mt-1">
+              Será enviado em: <span id="downsell-delay-preview" class="font-medium text-accent">20 minutos</span>
+            </p>
+            <p class="form-hint hidden text-rose-400" data-error-for="delay"></p>
+          </div>
+
+          <!-- Ativo -->
+          <div class="form-field">
+            <label class="inline-flex items-center gap-2 text-sm">
+              <input id="downsell-active" type="checkbox" class="form-checkbox" checked />
+              <span class="font-medium">Ativo</span>
+            </label>
+            <p class="text-xs text-zinc-500 mt-1">Downsells inativos não serão agendados</p>
+          </div>
+
+          <!-- Aviso -->
+          <div class="rounded-lg bg-zinc-800 border border-zinc-700 p-3">
+            <p class="text-xs text-zinc-400">
+              💡 O envio só ocorre se houver PIX gerado e não pago na hora do disparo. 
+              Se houver pagamento, cancelamos todas as pendências automaticamente.
+            </p>
+          </div>
+
+          <!-- Footer -->
+          <div class="flex flex-col gap-3 sm:flex-row sm:justify-end border-t border-zinc-700 pt-4">
+            <button type="button" class="btn-secondary sm:flex-1" data-close-modal="downsell-form-modal">Cancelar</button>
+            <button type="submit" id="downsell-save-btn" class="btn-primary sm:flex-1">Salvar</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Modal: Testar Downsell -->
+    <div id="downsell-test-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="downsell-test-modal-title">
+      <div class="modal-content" style="max-width: 500px;">
+        <header class="modal-header">
+          <h2 id="downsell-test-modal-title" class="text-lg font-semibold">Testar Downsell</h2>
+          <button class="modal-close" type="button" data-close-modal="downsell-test-modal" aria-label="Fechar">✖️</button>
+        </header>
+        
+        <form id="downsell-test-form" class="space-y-4">
+          <input type="hidden" id="test-downsell-id" />
+
+          <!-- Telegram ID -->
+          <div class="form-field">
+            <label for="test-telegram-id" class="form-label">
+              Telegram ID <span class="text-rose-400">*</span>
+            </label>
+            <input
+              id="test-telegram-id"
+              type="text"
+              required
+              placeholder="123456789"
+              class="form-input"
+            />
+            <p class="text-xs text-zinc-500 mt-1">ID do usuário que receberá o teste</p>
+          </div>
+
+          <!-- Gatilho -->
+          <div class="form-field">
+            <label class="form-label">Simular gatilho <span class="text-rose-400">*</span></label>
+            <div class="space-y-2">
+              <label class="inline-flex items-center gap-2 text-sm">
+                <input type="radio" name="test-trigger" value="start" class="form-radio" checked />
+                <span>/start</span>
+              </label>
+              <label class="inline-flex items-center gap-2 text-sm">
+                <input type="radio" name="test-trigger" value="pix" class="form-radio" />
+                <span>PIX</span>
+              </label>
+            </div>
+          </div>
+
+          <!-- Transaction ID (condicional) -->
+          <div id="test-transaction-field" class="form-field hidden">
+            <label for="test-transaction-id" class="form-label">
+              Transaction ID <span class="text-rose-400">*</span>
+            </label>
+            <input
+              id="test-transaction-id"
+              type="text"
+              placeholder="tx-abc123"
+              class="form-input"
+            />
+            <p class="text-xs text-zinc-500 mt-1">ID da transação PIX a simular</p>
+          </div>
+
+          <!-- Quando enviar -->
+          <div class="form-field">
+            <label for="test-respect-delay" class="form-label">Quando enviar</label>
+            <select id="test-respect-delay" class="form-input">
+              <option value="false">Agora (ignora delay)</option>
+              <option value="true">Respeitar delay configurado</option>
+            </select>
+          </div>
+
+          <!-- Aviso -->
+          <div class="rounded-lg bg-yellow-900/20 border border-yellow-700/30 p-3">
+            <p class="text-xs text-yellow-300">
+              ⚠️ O backend vai checar se há PIX não pago antes de enviar. 
+              Se não houver, o teste será ignorado com status "skipped".
+            </p>
+          </div>
+
+          <!-- Footer -->
+          <div class="flex flex-col gap-3 sm:flex-row sm:justify-end border-t border-zinc-700 pt-4">
+            <button type="button" class="btn-secondary sm:flex-1" data-close-modal="downsell-test-modal">Cancelar</button>
+            <button type="submit" id="downsell-test-submit-btn" class="btn-primary sm:flex-1">Executar Teste</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Modal: Confirmar Exclusão de Downsell -->
+    <div id="downsell-delete-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="downsell-delete-modal-title">
+      <div class="modal-content">
+        <header class="modal-header">
+          <h2 id="downsell-delete-modal-title" class="text-lg font-semibold">Confirmar Exclusão</h2>
+          <button class="modal-close" type="button" data-close-modal="downsell-delete-modal" aria-label="Fechar">✖️</button>
+        </header>
+        <div class="space-y-4">
+          <p class="text-sm text-zinc-300">
+            Você está prestes a excluir o downsell <strong id="delete-downsell-name"></strong>.
+          </p>
+          <p class="text-sm text-zinc-400">
+            Esta ação não pode ser desfeita. Downsells pendentes na fila serão mantidos até serem processados ou cancelados.
+          </p>
+          <div class="flex flex-col gap-3 sm:flex-row sm:justify-end">
+            <button type="button" class="btn-secondary sm:flex-1" data-close-modal="downsell-delete-modal">Cancelar</button>
+            <button type="button" id="confirm-downsell-delete-btn" class="btn-primary sm:flex-1 bg-red-600 hover:bg-red-700">Excluir</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Prévia do Downsell -->
+    <div id="downsell-preview-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="downsell-preview-modal-title">
+      <div class="modal-content" style="max-width: 600px;">
+        <header class="modal-header">
+          <h2 id="downsell-preview-modal-title" class="text-lg font-semibold">Prévia do Downsell</h2>
+          <button class="modal-close" type="button" data-close-modal="downsell-preview-modal" aria-label="Fechar">✖️</button>
+        </header>
+        <div class="space-y-4">
+          <div class="rounded-xl bg-surface border border-surfaceMuted p-4">
+            <pre id="downsell-preview-content" class="text-sm text-zinc-300 whitespace-pre-wrap font-mono"></pre>
+          </div>
+          <div class="flex justify-end">
+            <button type="button" class="btn-secondary" data-close-modal="downsell-preview-modal">Fechar</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="admin.js"></script>
   </body>
 </html>
