@@ -95,11 +95,21 @@ tr:hover td {
 .modal-content {
   width: 100%;
   max-width: 28rem;
+  max-height: 90vh;
   border-radius: 1.5rem;
   background: #18181b;
   border: 1px solid rgba(63, 63, 70, 0.6);
   box-shadow: 0 25px 60px -20px rgba(0, 0, 0, 0.75);
   padding: 2rem;
+  overflow-y: auto;
+  /* Esconder scrollbar mas manter funcionalidade */
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* IE e Edge */
+}
+
+/* Esconder scrollbar no Chrome, Safari e Opera */
+.modal-content::-webkit-scrollbar {
+  display: none;
 }
 
 .modal-header {

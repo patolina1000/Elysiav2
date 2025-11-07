@@ -36,6 +36,9 @@
             <p class="text-sm text-zinc-400" id="public-base-info"></p>
           </div>
           <div class="flex items-center gap-3">
+            <a href="/admin/media.html" class="btn-secondary inline-flex items-center gap-2" title="Gerenciar mídias">
+              🎬 Mídia
+            </a>
             <button id="admin-token-btn" class="btn-secondary" type="button">
               🔐 Chave Admin
             </button>
@@ -213,6 +216,12 @@
             </div>
             
             <div class="border-t border-zinc-700 pt-4 mt-4">
+              <h3 class="text-lg font-semibold mb-3">Disparos</h3>
+              <p class="text-sm text-zinc-400 mb-3">Envios em massa imediatos ou agendados para sua audiência</p>
+              <button class="btn-primary text-xs px-4 py-2" data-action="manage-shots">⚡ Gerenciar disparos</button>
+            </div>
+            
+            <div class="border-t border-zinc-700 pt-4 mt-4">
               <button class="btn-secondary text-xs px-4 py-2 text-red-400 hover:text-red-300" data-action="delete-bot">🗑️ Excluir Bot</button>
               <p class="text-xs text-zinc-500 mt-2">Soft delete: o bot será desativado mas os dados permanecerão no banco.</p>
             </div>
@@ -223,7 +232,7 @@
 
     <div id="toast-container" class="fixed top-4 right-4 z-50 flex flex-col gap-3"></div>
 
-    <div id="modal-overlay" class="modal-overlay hidden" aria-hidden="true"></div>
+    <div id="modal-overlay" class="modal-overlay hidden"></div>
 
     <div id="token-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="token-modal-title">
       <div class="modal-content">
@@ -330,21 +339,47 @@
     <div id="delete-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="delete-modal-title">
       <div class="modal-content">
         <header class="modal-header">
-          <h2 id="delete-modal-title" class="text-lg font-semibold">Confirmar Exclusão</h2>
+          <h2 id="delete-modal-title" class="text-lg font-semibold text-red-400">⚠️ Exclusão Permanente</h2>
           <button class="modal-close" type="button" data-close-modal="delete-modal" aria-label="Fechar">✖️</button>
         </header>
         <div class="space-y-4">
-          <p class="text-sm text-zinc-300">Você está prestes a excluir o bot <strong data-field="delete-bot-name"></strong> (<code data-field="delete-bot-slug"></code>).</p>
-          <p class="text-sm text-zinc-400">Esta é uma operação de <strong>soft delete</strong>. O bot será desativado e não aparecerá mais na lista, mas os dados permanecerão no banco de dados.</p>
+          <!-- Aviso em destaque -->
+          <div class="rounded-xl bg-red-900/30 border border-red-700/50 p-4">
+            <div class="flex items-start gap-3">
+              <span class="text-red-400 text-2xl">🗑️</span>
+              <div class="flex-1">
+                <p class="text-sm text-red-200 font-semibold mb-2">ATENÇÃO: Esta ação é IRREVERSÍVEL!</p>
+                <p class="text-xs text-red-300">
+                  Todos os dados do bot serão excluídos permanentemente do banco de dados, incluindo:
+                </p>
+                <ul class="text-xs text-red-300 mt-2 space-y-1 list-disc list-inside">
+                  <li>Configurações do bot</li>
+                  <li>Todos os disparos e filas</li>
+                  <li>Todos os downsells e agendamentos</li>
+                  <li>Mensagens personalizadas</li>
+                  <li>Histórico de eventos e gateway</li>
+                  <li>Dados de funil e pagamentos relacionados</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+          
+          <p class="text-sm text-zinc-300">
+            Você está prestes a excluir <strong class="text-red-400">permanentemente</strong> o bot 
+            <strong data-field="delete-bot-name"></strong> 
+            (<code class="bg-zinc-800 px-1 py-0.5 rounded" data-field="delete-bot-slug"></code>).
+          </p>
+          
           <div class="form-field">
-            <label class="inline-flex items-center gap-2 text-sm">
+            <label class="inline-flex items-center gap-2 text-sm cursor-pointer">
               <input id="delete-confirm-checkbox" type="checkbox" class="form-checkbox" />
-              <span>Entendo que o bot será desativado e removido da lista</span>
+              <span class="font-medium">Sim, quero excluir PERMANENTEMENTE este bot e TODOS os seus dados</span>
             </label>
           </div>
+          
           <div class="flex flex-col gap-3 sm:flex-row sm:justify-end">
             <button type="button" class="btn-secondary sm:flex-1" data-close-modal="delete-modal">Cancelar</button>
-            <button type="button" id="confirm-delete-btn" class="btn-primary sm:flex-1 bg-red-600 hover:bg-red-700" disabled>Excluir Bot</button>
+            <button type="button" id="confirm-delete-btn" class="btn-primary sm:flex-1 bg-red-600 hover:bg-red-700" disabled>🗑️ Excluir Permanentemente</button>
           </div>
         </div>
       </div>
@@ -401,6 +436,41 @@
               <p class="text-xs text-yellow-500 mt-1 hidden" id="start-message-raw-warning">
                 ⚠️ Quando marcado, o MarkdownV2 não será escapado automaticamente
               </p>
+            </div>
+          </div>
+
+          <!-- Mídia (opcional) -->
+          <div class="border-t border-zinc-700 pt-4" id="start-message-media-section">
+            <h3 class="text-sm font-semibold mb-2">Mídia (opcional)</h3>
+            <div class="space-y-3">
+              <div class="form-field">
+                <label for="start-message-media-type" class="form-label">Tipo de mídia</label>
+                <select id="start-message-media-type" class="form-input">
+                  <option value="none">Nenhuma</option>
+                  <option value="photo">Foto</option>
+                  <option value="video">Vídeo</option>
+                </select>
+              </div>
+              <div id="start-message-media-selector" class="hidden">
+                <button type="button" id="start-message-select-media-btn" class="btn-secondary text-xs px-4 py-2">
+                  🎬 Selecionar mídia aquecida
+                </button>
+                <input type="hidden" id="start-message-file-id">
+                <input type="hidden" id="start-message-media-id">
+                <input type="hidden" id="start-message-media-sha256">
+                <input type="hidden" id="start-message-media-r2-key">
+                <input type="hidden" id="start-message-media-kind">
+                <div id="start-message-selected-media" class="hidden mt-3 p-3 bg-zinc-800 rounded-lg">
+                  <div class="flex items-center gap-3">
+                    <img id="start-message-media-thumb" class="w-16 h-16 object-cover rounded" />
+                    <div class="flex-1">
+                      <p class="text-sm font-medium" id="start-message-media-name"></p>
+                      <p class="text-xs text-zinc-500" id="start-message-media-info"></p>
+                    </div>
+                    <button type="button" id="start-message-remove-media" class="text-red-400 hover:text-red-300">✖️</button>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -585,18 +655,25 @@
           </div>
 
           <div id="downsell-media-fields" class="space-y-3 hidden">
-            <div class="form-field">
-              <label for="downsell-file-id" class="form-label">File ID do Telegram</label>
-              <input
-                id="downsell-file-id"
-                type="text"
-                placeholder="AgACAgEAAxkBAAI..."
-                class="form-input"
-              />
-              <p class="text-xs text-zinc-500 mt-1">
-                Use o file_id de uma mídia já enviada no Telegram
-              </p>
+            <button type="button" id="downsell-select-media-btn" class="btn-secondary text-xs px-4 py-2">
+              🎬 Selecionar mídia aquecida
+            </button>
+            <input type="hidden" id="downsell-file-id">
+            <input type="hidden" id="downsell-media-id">
+            <input type="hidden" id="downsell-media-sha256">
+            <input type="hidden" id="downsell-media-r2-key">
+            <input type="hidden" id="downsell-media-kind">
+            <div id="downsell-selected-media" class="hidden mt-3 p-3 bg-zinc-800 rounded-lg">
+              <div class="flex items-center gap-3">
+                <img id="downsell-media-thumb" class="w-16 h-16 object-cover rounded" />
+                <div class="flex-1">
+                  <p class="text-sm font-medium" id="downsell-media-name"></p>
+                  <p class="text-xs text-zinc-500" id="downsell-media-info"></p>
+                </div>
+                <button type="button" id="downsell-remove-media" class="text-red-400 hover:text-red-300">✖️</button>
+              </div>
             </div>
+            
             <div class="form-field">
               <label for="downsell-caption" class="form-label">Caption (MarkdownV2)</label>
               <textarea
@@ -789,6 +866,481 @@
           </div>
           <div class="flex justify-end">
             <button type="button" class="btn-secondary" data-close-modal="downsell-preview-modal">Fechar</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ========== MODAIS DE DISPAROS (SHOTS) ========== -->
+    
+    <!-- Modal: Lista de Disparos -->
+    <div id="shots-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="shots-modal-title">
+      <div class="modal-content" style="max-width: 1200px;">
+        <header class="modal-header">
+          <h2 id="shots-modal-title" class="text-lg font-semibold">Disparos</h2>
+          <button class="modal-close" type="button" data-close-modal="shots-modal" aria-label="Fechar">✖️</button>
+        </header>
+        
+        <div class="space-y-4">
+          <!-- Aviso sobre regra de negócio -->
+          <div class="rounded-xl bg-blue-900/20 border border-blue-700/30 p-4">
+            <div class="flex items-start gap-3">
+              <span class="text-blue-400 text-xl">ℹ️</span>
+              <div class="flex-1">
+                <p class="text-sm text-blue-200 font-medium mb-1">Regra de envio</p>
+                <p class="text-xs text-blue-300">
+                  Disparos aplicam a segmentação no momento do envio, garantindo audiência atualizada.
+                  Envios imediatos iniciam automaticamente após criação.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Barra de ações -->
+          <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div class="flex-1">
+              <input 
+                type="text" 
+                id="shot-search" 
+                placeholder="Buscar por título..." 
+                class="form-input text-sm w-full"
+              />
+            </div>
+            <button id="new-shot-btn" class="btn-primary text-sm px-4 py-2 whitespace-nowrap">
+              ➕ Novo Disparo
+            </button>
+          </div>
+
+          <!-- Lista/Tabela -->
+          <div id="shots-list-container">
+            <!-- Loading state -->
+            <div id="shots-loading" class="hidden py-12 text-center">
+              <div class="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-accent"></div>
+              <p class="text-sm text-zinc-400 mt-3">Carregando disparos...</p>
+            </div>
+
+            <!-- Empty state -->
+            <div id="shots-empty" class="hidden py-12 text-center">
+              <p class="text-zinc-400 mb-3">Nenhum disparo configurado</p>
+              <button class="btn-primary text-sm px-4 py-2" data-action="new-shot">
+                ➕ Criar primeiro disparo
+              </button>
+            </div>
+
+            <!-- Error state -->
+            <div id="shots-error" class="hidden py-12 text-center">
+              <p class="text-red-400 mb-3">Erro ao carregar disparos</p>
+              <button class="btn-secondary text-sm px-4 py-2" data-action="retry-load-shots">
+                🔄 Tentar novamente
+              </button>
+            </div>
+
+            <!-- Table -->
+            <div id="shots-table-wrapper" class="hidden overflow-x-auto">
+              <table class="min-w-full divide-y divide-surfaceMuted text-sm">
+                <thead class="bg-surface">
+                  <tr>
+                    <th scope="col" class="table-head">Título</th>
+                    <th scope="col" class="table-head">Status</th>
+                    <th scope="col" class="table-head">Quando</th>
+                    <th scope="col" class="table-head">Audiência</th>
+                    <th scope="col" class="table-head">Progresso</th>
+                    <th scope="col" class="table-head">Ações</th>
+                  </tr>
+                </thead>
+                <tbody id="shots-table-body" class="divide-y divide-surfaceMuted">
+                  <!-- Conteúdo dinâmico -->
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <div class="flex justify-between items-center border-t border-zinc-700 pt-4">
+            <p class="text-xs text-zinc-500">
+              Total: <span id="shots-count">0</span> disparo(s)
+            </p>
+            <button type="button" class="btn-secondary" data-close-modal="shots-modal">Fechar</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Criar/Editar Disparo -->
+    <div id="shot-form-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="shot-form-modal-title">
+      <div class="modal-content" style="max-width: 800px;">
+        <header class="modal-header">
+          <h2 id="shot-form-modal-title" class="text-lg font-semibold">Novo Disparo</h2>
+          <button class="modal-close" type="button" data-close-modal="shot-form-modal" aria-label="Fechar">✖️</button>
+        </header>
+        
+        <form id="shot-form" class="space-y-5">
+          <input type="hidden" id="shot-id" />
+
+          <!-- Card Informativo -->
+          <div class="rounded-xl bg-blue-900/20 border border-blue-700/30 p-4">
+            <div class="flex items-start gap-3">
+              <span class="text-blue-400 text-xl">ℹ️</span>
+              <div class="flex-1 space-y-1">
+                <p class="text-sm text-blue-200 font-medium">Regras de envio</p>
+                <p class="text-xs text-blue-300">• A segmentação é aplicada no momento do envio</p>
+                <p class="text-xs text-blue-300">• Por padrão, quem já pagou é excluído automaticamente</p>
+                <p class="text-xs text-blue-300">• MarkdownV2 ativo — caracteres especiais são escapados automaticamente</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Título -->
+          <div class="form-field">
+            <label for="shot-title" class="form-label">
+              Título <span class="text-rose-400">*</span>
+            </label>
+            <input 
+              type="text" 
+              id="shot-title" 
+              class="form-input" 
+              maxlength="120"
+              required 
+              placeholder="Ex: Promoção de Black Friday"
+            />
+            <p class="text-xs text-zinc-500 mt-1">
+              <span id="shot-title-count">0</span> / 120 caracteres
+            </p>
+          </div>
+
+          <!-- Mensagem (MarkdownV2) -->
+          <div class="form-field">
+            <label for="shot-message-text" class="form-label">
+              Mensagem (MarkdownV2) <span class="text-rose-400">*</span>
+            </label>
+            <textarea 
+              id="shot-message-text" 
+              rows="6"
+              maxlength="4096"
+              required
+              placeholder="Digite sua mensagem usando MarkdownV2..."
+              class="form-input font-mono text-sm resize-y"
+              style="min-height: 150px;"
+            ></textarea>
+            <div class="flex items-center justify-between mt-1">
+              <p class="text-xs text-yellow-500">
+                ⚠️ MarkdownV2 ativo. Caracteres especiais: <code class="text-xs">_ * [ ] ( ) ~ ` &gt; # + - = | { } . !</code>
+              </p>
+              <p class="text-xs text-zinc-500">
+                <span id="shot-message-count">0</span> / 4096
+              </p>
+            </div>
+            <p class="text-xs text-zinc-600 mt-1">
+              MarkdownV2 ativo. Escape automático dos caracteres <code class="text-xs">_*~`&gt;#+-=|{}.!</code>
+            </p>
+            <div class="flex gap-2 mt-2">
+              <button type="button" id="shot-preview-btn" class="btn-secondary text-xs px-3 py-2">👁️ Preview</button>
+              <button type="button" id="shot-clear-btn" class="btn-secondary text-xs px-3 py-2">🗑️ Limpar</button>
+            </div>
+            <p class="form-hint hidden text-rose-400" data-error-for="message"></p>
+          </div>
+
+          <!-- Mídia (opcional) -->
+          <div class="form-field">
+            <label for="shot-media-type" class="form-label">Mídia (opcional)</label>
+            <select id="shot-media-type" class="form-input">
+              <option value="none">Nenhuma</option>
+              <option value="photo">Foto</option>
+              <option value="video">Vídeo</option>
+            </select>
+          </div>
+
+          <div id="shot-media-fields" class="space-y-3 hidden">
+            <button type="button" id="shot-select-media-btn" class="btn-secondary text-xs px-4 py-2">
+              🎬 Selecionar mídia aquecida
+            </button>
+            <input type="hidden" id="shot-file-id">
+            <input type="hidden" id="shot-media-id">
+            <input type="hidden" id="shot-media-sha256">
+            <input type="hidden" id="shot-media-r2-key">
+            <input type="hidden" id="shot-media-kind">
+            <div id="shot-selected-media" class="hidden mt-3 p-3 bg-zinc-800 rounded-lg">
+              <div class="flex items-center gap-3">
+                <img id="shot-media-thumb" class="w-16 h-16 object-cover rounded" />
+                <div class="flex-1">
+                  <p class="text-sm font-medium" id="shot-media-name"></p>
+                  <p class="text-xs text-zinc-500" id="shot-media-info"></p>
+                </div>
+                <button type="button" id="shot-remove-media" class="text-red-400 hover:text-red-300">✖️</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Quando Enviar -->
+          <div class="form-field">
+            <label class="form-label">Quando enviar <span class="text-rose-400">*</span></label>
+            <div class="space-y-3">
+              <label class="inline-flex items-center gap-2 text-sm cursor-pointer">
+                <input type="radio" name="shot-trigger" value="now" id="shot-trigger-now" checked class="form-checkbox" style="border-radius: 50%;" />
+                <span>⚡ Enviar agora (imediato)</span>
+              </label>
+              <label class="inline-flex items-center gap-2 text-sm cursor-pointer">
+                <input type="radio" name="shot-trigger" value="schedule" id="shot-trigger-schedule" class="form-checkbox" style="border-radius: 50%;" />
+                <span>📅 Agendar para data/hora específica</span>
+              </label>
+
+              <!-- Campos de Agendamento -->
+              <div id="shot-schedule-fields" class="pl-6 space-y-3 hidden">
+                <div class="grid grid-cols-2 gap-3">
+                  <div class="form-field">
+                    <label for="shot-schedule-date" class="text-xs text-zinc-400 mb-1">Data</label>
+                    <input type="date" id="shot-schedule-date" class="form-input text-sm" />
+                  </div>
+                  <div class="form-field">
+                    <label for="shot-schedule-time" class="text-xs text-zinc-400 mb-1">Hora</label>
+                    <select id="shot-schedule-time" class="form-input text-sm">
+                      <!-- Preenchido via JS com opções de 15 em 15 min -->
+                    </select>
+                  </div>
+                </div>
+                <p class="text-xs text-zinc-500" id="shot-schedule-summary"></p>
+                <p id="shot-schedule-warning" class="text-xs text-yellow-500 hidden"></p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Audiência (Segmentação) -->
+          <div class="form-field">
+            <label class="form-label">Audiência (Segmentação)</label>
+            <div class="space-y-2">
+              <label class="inline-flex items-center gap-2 text-sm cursor-pointer">
+                <input type="checkbox" id="shot-filter-all-started" checked class="form-checkbox" />
+                <span>👥 Todos que deram /start</span>
+              </label>
+              <label class="inline-flex items-center gap-2 text-sm cursor-pointer">
+                <input type="checkbox" id="shot-filter-has-unpaid-pix" class="form-checkbox" />
+                <span>💳 Apenas quem tem PIX aberto e não pago</span>
+              </label>
+              <label class="inline-flex items-center gap-2 text-sm cursor-pointer">
+                <input type="checkbox" id="shot-filter-exclude-paid" checked class="form-checkbox" />
+                <span>✅ Excluir quem já pagou</span>
+              </label>
+            </div>
+            <p class="text-xs text-zinc-500 mt-2">
+              A segmentação é avaliada no momento do envio
+            </p>
+          </div>
+
+          <!-- Opções -->
+          <div class="form-field">
+            <label class="form-label">Opções</label>
+            <div class="space-y-3">
+              <label class="inline-flex items-center gap-2 text-sm">
+                <input id="shot-active" type="checkbox" class="form-checkbox" checked />
+                <span class="font-medium">Ativo</span>
+              </label>
+              <p class="text-xs text-zinc-500">Disparos inativos não serão enviados ou agendados</p>
+              
+              <!-- Enviar Teste -->
+              <div class="border-t border-zinc-700 pt-3">
+                <p class="text-sm font-medium mb-2">Enviar teste</p>
+                <div class="flex gap-2">
+                  <input
+                    id="shot-test-chat-id"
+                    type="text"
+                    placeholder="Chat ID (ex: 123456789)"
+                    class="form-input flex-1 text-sm"
+                  />
+                  <button type="button" id="shot-test-send-btn" class="btn-secondary text-xs px-4 py-2 whitespace-nowrap">
+                    Enviar teste
+                  </button>
+                </div>
+                <p class="text-xs text-zinc-500 mt-1">Envia a mensagem atual sem criar/modificar o disparo</p>
+                <div id="shot-test-result" class="mt-2 text-xs hidden"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <div class="flex flex-col gap-3 sm:flex-row sm:justify-end border-t border-zinc-700 pt-4">
+            <button type="button" class="btn-secondary sm:flex-1" data-close-modal="shot-form-modal">Cancelar</button>
+            <button type="submit" id="shot-save-btn" class="btn-primary sm:flex-1">Salvar</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Modal: Detalhes do Disparo -->
+    <div id="shot-details-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="shot-details-modal-title">
+      <div class="modal-content" style="max-width: 900px;">
+        <header class="modal-header">
+          <h2 id="shot-details-modal-title" class="text-lg font-semibold">Detalhes do Disparo</h2>
+          <button class="modal-close" type="button" data-close-modal="shot-details-modal" aria-label="Fechar">✖️</button>
+        </header>
+        
+        <div class="space-y-5">
+          <!-- Cabeçalho com Info -->
+          <div class="bg-surfaceMuted border border-zinc-700 rounded-lg p-4">
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div>
+                <p class="text-xs text-zinc-500 mb-1">Título</p>
+                <p id="shot-detail-title" class="text-sm font-medium">-</p>
+              </div>
+              <div>
+                <p class="text-xs text-zinc-500 mb-1">Status</p>
+                <p id="shot-detail-status" class="text-sm">-</p>
+              </div>
+              <div>
+                <p class="text-xs text-zinc-500 mb-1">Quando</p>
+                <p id="shot-detail-when" class="text-sm">-</p>
+              </div>
+              <div>
+                <p class="text-xs text-zinc-500 mb-1">Timezone</p>
+                <p id="shot-detail-timezone" class="text-sm text-zinc-400">-</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Contadores (Cards) -->
+          <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
+            <div class="bg-surface border border-zinc-700 rounded-lg p-3 text-center">
+              <p class="text-xs text-zinc-500 mb-1">Fila</p>
+              <p id="shot-detail-queued" class="text-2xl font-bold text-blue-400">0</p>
+            </div>
+            <div class="bg-surface border border-zinc-700 rounded-lg p-3 text-center">
+              <p class="text-xs text-zinc-500 mb-1">Enviados</p>
+              <p id="shot-detail-sent" class="text-2xl font-bold text-green-400">0</p>
+            </div>
+            <div class="bg-surface border border-zinc-700 rounded-lg p-3 text-center">
+              <p class="text-xs text-zinc-500 mb-1">Ignorados</p>
+              <p id="shot-detail-skipped" class="text-2xl font-bold text-yellow-400">0</p>
+            </div>
+            <div class="bg-surface border border-zinc-700 rounded-lg p-3 text-center">
+              <p class="text-xs text-zinc-500 mb-1">Falhas</p>
+              <p id="shot-detail-failed" class="text-2xl font-bold text-red-400">0</p>
+            </div>
+            <div class="bg-surface border border-zinc-700 rounded-lg p-3 text-center">
+              <p class="text-xs text-zinc-500 mb-1">Total</p>
+              <p id="shot-detail-total" class="text-2xl font-bold">0</p>
+            </div>
+          </div>
+
+          <!-- Barra de Progresso -->
+          <div>
+            <div class="flex justify-between text-xs text-zinc-500 mb-1">
+              <span>Progresso</span>
+              <span id="shot-detail-progress-percent">0%</span>
+            </div>
+            <div class="w-full bg-zinc-800 rounded-full h-3">
+              <div id="shot-detail-progress-bar" class="bg-gradient-to-r from-blue-500 to-purple-500 h-3 rounded-full transition-all duration-300" style="width: 0%"></div>
+            </div>
+          </div>
+
+          <!-- Ações -->
+          <div class="flex gap-3 border-t border-zinc-700 pt-4">
+            <button type="button" id="shot-detail-cancel-btn" class="btn-secondary flex-1 hidden">Cancelar Disparo</button>
+            <button type="button" id="shot-detail-duplicate-btn" class="btn-secondary flex-1">📋 Duplicar</button>
+            <button type="button" class="btn-secondary flex-1" data-close-modal="shot-details-modal">Fechar</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Confirmar Cancelamento de Disparo -->
+    <div id="shot-cancel-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="shot-cancel-modal-title">
+      <div class="modal-content">
+        <header class="modal-header">
+          <h2 id="shot-cancel-modal-title" class="text-lg font-semibold">Confirmar Cancelamento</h2>
+          <button class="modal-close" type="button" data-close-modal="shot-cancel-modal" aria-label="Fechar">✖️</button>
+        </header>
+        <div class="space-y-4">
+          <p class="text-sm text-zinc-300">
+            Você está prestes a cancelar o disparo <strong id="cancel-shot-name"></strong>.
+          </p>
+          <p class="text-sm text-zinc-400">
+            Envios pendentes serão marcados como cancelados e não serão mais processados.
+          </p>
+          <div class="flex flex-col gap-3 sm:flex-row sm:justify-end">
+            <button type="button" class="btn-secondary sm:flex-1" data-close-modal="shot-cancel-modal">Voltar</button>
+            <button type="button" id="confirm-shot-cancel-btn" class="btn-primary sm:flex-1 bg-red-600 hover:bg-red-700">Cancelar Disparo</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Confirmar Exclusão de Disparo -->
+    <div id="shot-delete-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="shot-delete-modal-title">
+      <div class="modal-content">
+        <header class="modal-header">
+          <h2 id="shot-delete-modal-title" class="text-lg font-semibold">Confirmar Exclusão</h2>
+          <button class="modal-close" type="button" data-close-modal="shot-delete-modal" aria-label="Fechar">✖️</button>
+        </header>
+        <div class="space-y-4">
+          <p class="text-sm text-zinc-300">
+            Você está prestes a excluir o disparo <strong id="delete-shot-name"></strong>.
+          </p>
+          <p class="text-sm text-zinc-400">
+            Esta ação não pode ser desfeita. Apenas disparos em rascunho ou agendados podem ser excluídos.
+          </p>
+          <div class="flex flex-col gap-3 sm:flex-row sm:justify-end">
+            <button type="button" class="btn-secondary sm:flex-1" data-close-modal="shot-delete-modal">Cancelar</button>
+            <button type="button" id="confirm-shot-delete-btn" class="btn-primary sm:flex-1 bg-red-600 hover:bg-red-700">Excluir</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Prévia do Disparo -->
+    <div id="shot-preview-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="shot-preview-modal-title">
+      <div class="modal-content" style="max-width: 600px;">
+        <header class="modal-header">
+          <h2 id="shot-preview-modal-title" class="text-lg font-semibold">Prévia da Mensagem</h2>
+          <button class="modal-close" type="button" data-close-modal="shot-preview-modal" aria-label="Fechar">✖️</button>
+        </header>
+        <div class="space-y-4">
+          <div class="rounded-xl bg-surface border border-surfaceMuted p-4">
+            <pre id="shot-preview-content" class="text-sm text-zinc-300 whitespace-pre-wrap font-mono"></pre>
+          </div>
+          <div class="flex justify-end">
+            <button type="button" class="btn-secondary" data-close-modal="shot-preview-modal">Fechar</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Seletor de Mídia -->
+    <div id="media-selector-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="media-selector-modal-title">
+      <div class="modal-content" style="max-width: 1000px;">
+        <header class="modal-header">
+          <h2 id="media-selector-modal-title" class="text-lg font-semibold">🎬 Selecionar Mídia Aquecida</h2>
+          <button class="modal-close" type="button" data-close-modal="media-selector-modal" aria-label="Fechar">✖️</button>
+        </header>
+        
+        <div class="space-y-4">
+          <!-- Filtros -->
+          <div class="flex gap-3">
+            <input 
+              type="text" 
+              id="media-search" 
+              placeholder="Buscar por nome..." 
+              class="form-input flex-1"
+            />
+            <select id="media-type-filter" class="form-input" style="width: 150px;">
+              <option value="">Todos os tipos</option>
+              <option value="photo">Fotos</option>
+              <option value="video">Vídeos</option>
+            </select>
+          </div>
+
+          <!-- Grid de Mídias -->
+          <div id="media-grid" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4" style="max-height: 500px; overflow-y: auto;">
+            <!-- Preenchido via JS -->
+          </div>
+
+          <!-- Estado vazio -->
+          <div id="media-empty-state" class="hidden text-center py-12">
+            <p class="text-zinc-400 text-sm">Nenhuma mídia aquecida encontrada</p>
+            <p class="text-zinc-500 text-xs mt-2">Faça upload de mídias primeiro em Mídia → Upload</p>
+          </div>
+
+          <!-- Loading -->
+          <div id="media-loading" class="hidden text-center py-12">
+            <p class="text-zinc-400 text-sm">🔄 Carregando mídias...</p>
           </div>
         </div>
       </div>

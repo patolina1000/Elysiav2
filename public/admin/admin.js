@@ -414,7 +414,6 @@
     focusState.lastFocused = document.activeElement;
     modal.classList.remove('hidden');
     elements.modalOverlay.classList.remove('hidden');
-    elements.modalOverlay.setAttribute('aria-hidden', 'false');
     modal.setAttribute('aria-hidden', 'false');
     trapFocus(modal);
 
@@ -452,7 +451,6 @@
     const anyOpen = document.querySelectorAll('.modal:not(.hidden)').length > 0;
     if (!anyOpen) {
       elements.modalOverlay.classList.add('hidden');
-      elements.modalOverlay.setAttribute('aria-hidden', 'true');
     }
 
     if (focusState.lastFocused && typeof focusState.lastFocused.focus === 'function') {
@@ -466,7 +464,6 @@
       modal.setAttribute('aria-hidden', 'true');
     });
     elements.modalOverlay.classList.add('hidden');
-    elements.modalOverlay.setAttribute('aria-hidden', 'true');
     if (focusState.lastFocused) {
       focusState.lastFocused.focus();
     }
@@ -1037,6 +1034,70 @@
           }
           break;
         }
+        case 'manage-downsells': {
+          const slug = target.dataset.slug || currentAdminSlug();
+          if (!slug) {
+            console.error('[ADMIN][MANAGE_DOWNSELLS] Slug não encontrado');
+            showToast('error', 'Slug não encontrado');
+            return;
+          }
+          try {
+            console.log('[ADMIN][MANAGE_DOWNSELLS]', { slug });
+            await openDownsellsModal(slug);
+          } catch (err) {
+            console.error('[ADMIN][MANAGE_DOWNSELLS][ERR]', err);
+            showToast('error', `Erro ao abrir modal: ${err.message}`);
+          }
+          break;
+        }
+        case 'new-downsell': {
+          const slug = currentDownsellsSlug;
+          if (!slug) {
+            showToast('error', 'Slug não encontrado');
+            return;
+          }
+          await openDownsellFormModal(slug);
+          break;
+        }
+        case 'retry-load-downsells': {
+          const slug = currentDownsellsSlug;
+          if (slug) {
+            await loadDownsells(slug);
+          }
+          break;
+        }
+        case 'manage-shots': {
+          const slug = target.dataset.slug || currentAdminSlug();
+          if (!slug) {
+            console.error('[ADMIN][MANAGE_SHOTS] Slug não encontrado');
+            showToast('error', 'Slug não encontrado');
+            return;
+          }
+          try {
+            console.log('[ADMIN][MANAGE_SHOTS]', { slug });
+            await openShotsModal(slug);
+          } catch (err) {
+            console.error('[ADMIN][MANAGE_SHOTS][ERR]', err);
+            showToast('error', `Erro ao abrir modal: ${err.message}`);
+          }
+          break;
+        }
+        case 'new-shot': {
+          const slug = currentShotsSlug;
+          if (!slug) {
+            showToast('error', 'Slug não encontrado');
+            return;
+          }
+          await openShotFormModal(slug);
+          break;
+        }
+        case 'retry-load-shots': {
+          const slug = currentShotsSlug;
+          if (slug) {
+            await loadShots(slug);
+          }
+          break;
+        }
       }
     });
 
@@ -1371,8 +1432,10 @@
 
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 8000);
-      const response = await fetch(`${baseUrl}/api/admin/bots/${encodeURIComponent(slug)}`, {
+      const timeout = setTimeout(() => controller.abort(), 15000); // Aumentado para 15s por ser hard delete
+      
+      // HARD DELETE - passa ?hard=1 para deletar TODOS os dados permanentemente
+      const response = await fetch(`${baseUrl}/api/admin/bots/${encodeURIComponent(slug)}?hard=1`, {
         method: 'DELETE',
         headers,
         signal: controller.signal,
@@ -1382,7 +1445,12 @@
       const data = await response.json().catch(() => ({}));
 
       if (response.ok && data.ok) {
-        showToast('success', `Bot ${slug} excluído com sucesso.`);
+        const recordsDeleted = data.deleted_records || {};
+        const totalRecords = Object.values(recordsDeleted).reduce((sum, count) => sum + count, 0);
+        
+        console.log('[ADMIN][DELETE][HARD][SUCCESS]', { slug, deleted_records: recordsDeleted, total: totalRecords });
+        
+        showToast('success', `Bot ${slug} e todos os seus dados (${totalRecords} registros) foram excluídos permanentemente.`);
         closeModal('delete-modal');
         
         // Navegar de volta para lista
@@ -1396,7 +1464,11 @@
         showToast('error', `Erro ao excluir: ${errorMsg}`);
       }
     } catch (err) {
-      showToast('error', 'Erro ao excluir bot.');
+      if (err.name === 'AbortError') {
+        showToast('error', 'Timeout ao excluir bot. Tente novamente.');
+      } else {
+        showToast('error', 'Erro ao excluir bot.');
+      }
       console.error('[ADMIN][ERR] delete-bot:', err);
     } finally {
       if (confirmBtn) confirmBtn.disabled = false;
@@ -1710,6 +1782,7 @@
   async function openStartMessageModal(slug) {
     console.log('[START_MESSAGE][OPEN_MODAL]', { slug });
     currentStartMessageSlug = slug;
+    setCurrentMediaBotSlug(slug); // Para o seletor de mídia
     const modal = document.getElementById('start-message-modal');
     const overlay = document.getElementById('modal-overlay');
     
@@ -1747,6 +1820,42 @@
       document.getElementById('start-message-text').value = data.message?.text || '';
       document.getElementById('start-message-disable-preview').checked = data.message?.disable_web_page_preview || false;
       document.getElementById('start-message-raw').checked = data.message?.raw || false;
+      
+      // Carregar mídia se configurada
+      if (data.message?.media) {
+        const media = data.message.media;
+        document.getElementById('start-message-file-id').value = media.file_id || '';
+        document.getElementById('start-message-media-id').value = media.media_id || '';
+        document.getElementById('start-message-media-sha256').value = media.sha256 || '';
+        document.getElementById('start-message-media-r2-key').value = media.r2_key || '';
+        document.getElementById('start-message-media-kind').value = media.kind || '';
+        
+        // Mostrar preview se houver mídia
+        if (media.file_id && media.kind) {
+          const selectedDiv = document.getElementById('start-message-selected-media');
+          const thumb = document.getElementById('start-message-media-thumb');
+          const nameEl = document.getElementById('start-message-media-name');
+          const infoEl = document.getElementById('start-message-media-info');
+          const mediaType = document.getElementById('start-message-media-type');
+          
+          if (selectedDiv) selectedDiv.classList.remove('hidden');
+          if (thumb && media.media_id) thumb.src = `${baseUrl}/api/media/preview/${media.media_id}`;
+          if (nameEl) nameEl.textContent = media.r2_key ? media.r2_key.split('/').pop() : 'Mídia selecionada';
+          if (infoEl) infoEl.textContent = `${media.kind}`;
+          if (mediaType) {
+            mediaType.value = media.kind;
+            document.getElementById('start-message-media-selector')?.classList.remove('hidden');
+          }
+        }
+      } else {
+        // Limpar campos de mídia se não houver
+        document.getElementById('start-message-file-id').value = '';
+        document.getElementById('start-message-media-id').value = '';
+        document.getElementById('start-message-media-sha256').value = '';
+        document.getElementById('start-message-media-r2-key').value = '';
+        document.getElementById('start-message-media-kind').value = '';
+        document.getElementById('start-message-selected-media')?.classList.add('hidden');
+      }
       
       // Atualizar contador
       updateCharCount();
@@ -1830,6 +1939,13 @@
     const disablePreview = document.getElementById('start-message-disable-preview').checked;
     const raw = document.getElementById('start-message-raw').checked;
     
+    // Dados de mídia (se selecionada)
+    const fileId = document.getElementById('start-message-file-id')?.value || '';
+    const mediaId = document.getElementById('start-message-media-id')?.value || '';
+    const sha256 = document.getElementById('start-message-media-sha256')?.value || '';
+    const r2Key = document.getElementById('start-message-media-r2-key')?.value || '';
+    const kind = document.getElementById('start-message-media-kind')?.value || '';
+    
     // Validação
     if (active && !text) {
       showToast('error', 'Texto obrigatório quando ativo');
@@ -1841,14 +1957,27 @@
       return;
     }
     
+    const message = active ? {
+      text,
+      parse_mode: 'MarkdownV2',
+      disable_web_page_preview: disablePreview,
+      raw
+    } : null;
+    
+    // Adicionar mídia se selecionada
+    if (message && fileId && sha256 && kind && r2Key) {
+      message.media = {
+        file_id: fileId,
+        media_id: mediaId ? parseInt(mediaId) : undefined,
+        sha256,
+        kind,
+        r2_key: r2Key
+      };
+    }
+    
     const payload = {
       active,
-      message: active ? {
-        text,
-        parse_mode: 'MarkdownV2',
-        disable_web_page_preview: disablePreview,
-        raw
-      } : null
+      message
     };
     
     const headers = getAuthHeaders();
@@ -1955,6 +2084,1404 @@
     }
   }
 
+  // ========== DOWNSELLS ==========
+  
+  let currentDownsellsSlug = null;
+  let currentDownsells = [];
+  let downsellsSearchTerm = '';
+  let currentEditingDownsellId = null;
+
+  // ========== SHOTS (DISPAROS) ==========
+  
+  let currentShotsSlug = null;
+  let currentShots = [];
+  let shotsSearchTerm = '';
+  let currentEditingShotId = null;
+
+  async function openDownsellsModal(slug) {
+    console.log('[DOWNSELLS][OPEN_MODAL]', { slug });
+    currentDownsellsSlug = slug;
+    setCurrentMediaBotSlug(slug); // Para o seletor de mídia
+    
+    const modal = document.getElementById('downsells-modal');
+    const overlay = document.getElementById('modal-overlay');
+    
+    if (!modal || !overlay) {
+      console.error('[DOWNSELLS][MODAL_NOT_FOUND]');
+      return;
+    }
+
+    modal.classList.remove('hidden');
+    overlay.classList.remove('hidden');
+    
+    await loadDownsells(slug);
+  }
+
+  async function loadDownsells(slug) {
+    const loadingEl = document.getElementById('downsells-loading');
+    const emptyEl = document.getElementById('downsells-empty');
+    const errorEl = document.getElementById('downsells-error');
+    const tableWrapper = document.getElementById('downsells-table-wrapper');
+    
+    // Mostrar loading
+    loadingEl?.classList.remove('hidden');
+    emptyEl?.classList.add('hidden');
+    errorEl?.classList.add('hidden');
+    tableWrapper?.classList.add('hidden');
+    
+    const headers = getAuthHeaders();
+    if (!headers) {
+      showToast('error', 'Token admin não configurado.');
+      errorEl?.classList.remove('hidden');
+      loadingEl?.classList.add('hidden');
+      return;
+    }
+    
+    try {
+      const response = await fetch(`${baseUrl}/api/admin/bots/${encodeURIComponent(slug)}/downsells`, {
+        headers
+      });
+      
+      if (!response.ok) throw new Error('Falha ao carregar downsells');
+      
+      const data = await response.json();
+      currentDownsells = data.downsells || [];
+      
+      console.log('[DOWNSELLS][LOADED]', { count: currentDownsells.length });
+      
+      if (currentDownsells.length === 0) {
+        emptyEl?.classList.remove('hidden');
+        loadingEl?.classList.add('hidden');
+      } else {
+        renderDownsellsTable(currentDownsells);
+        tableWrapper?.classList.remove('hidden');
+        loadingEl?.classList.add('hidden');
+      }
+      
+      updateDownsellsCount();
+    } catch (err) {
+      console.error('[DOWNSELLS][LOAD][ERR]', err);
+      errorEl?.classList.remove('hidden');
+      loadingEl?.classList.add('hidden');
+      showToast('error', 'Erro ao carregar downsells');
+    }
+  }
+
+  function renderDownsellsTable(downsells) {
+    const tbody = document.getElementById('downsells-table-body');
+    if (!tbody) return;
+    
+    tbody.innerHTML = '';
+    
+    // Filtrar por busca
+    let filtered = downsells;
+    if (downsellsSearchTerm) {
+      const term = downsellsSearchTerm.toLowerCase();
+      filtered = downsells.filter(d => {
+        const name = (d.name || '').toLowerCase();
+        const content = JSON.stringify(d.content || {}).toLowerCase();
+        return name.includes(term) || content.includes(term);
+      });
+    }
+    
+    if (filtered.length === 0 && downsellsSearchTerm) {
+      tbody.innerHTML = '<tr><td colspan="6" class="table-cell text-center text-zinc-500">Nenhum resultado encontrado</td></tr>';
+      return;
+    }
+    
+    filtered.forEach(downsell => {
+      tbody.appendChild(renderDownsellRow(downsell));
+    });
+  }
+
+  function renderDownsellRow(downsell) {
+    const tr = document.createElement('tr');
+    
+    // Título
+    const tdTitle = document.createElement('td');
+    tdTitle.className = 'table-cell';
+    tdTitle.textContent = downsell.name || 'Sem título';
+    tr.appendChild(tdTitle);
+    
+    // Gatilhos
+    const tdTriggers = document.createElement('td');
+    tdTriggers.className = 'table-cell';
+    const triggers = [];
+    if (downsell.after_start) triggers.push('START');
+    if (downsell.after_pix) triggers.push('PIX');
+    tdTriggers.innerHTML = triggers.length > 0 
+      ? triggers.map(t => `<span class="px-2 py-1 text-xs rounded bg-blue-900/30 text-blue-300">${t}</span>`).join(' ')
+      : '<span class="text-zinc-500 text-xs">Nenhum</span>';
+    tr.appendChild(tdTriggers);
+    
+    // Delay
+    const tdDelay = document.createElement('td');
+    tdDelay.className = 'table-cell';
+    const delayMinutes = downsell.delay_minutes || Math.round((downsell.delay_seconds || 0) / 60);
+    tdDelay.textContent = `${delayMinutes} min`;
+    tr.appendChild(tdDelay);
+    
+    // Ativo
+    const tdActive = document.createElement('td');
+    tdActive.className = 'table-cell';
+    const activeSpan = document.createElement('span');
+    activeSpan.className = `px-2 py-1 text-xs rounded ${downsell.active ? 'bg-green-900/30 text-green-300' : 'bg-zinc-700 text-zinc-400'}`;
+    activeSpan.textContent = downsell.active ? 'Ativo' : 'Inativo';
+    tdActive.appendChild(activeSpan);
+    tr.appendChild(tdActive);
+    
+    // Prévia
+    const tdPreview = document.createElement('td');
+    tdPreview.className = 'table-cell';
+    try {
+      const content = typeof downsell.content === 'string' ? JSON.parse(downsell.content) : downsell.content;
+      const preview = (content.text || '').substring(0, 50);
+      tdPreview.textContent = preview ? `${preview}...` : 'Sem texto';
+      tdPreview.title = content.text || '';
+    } catch {
+      tdPreview.textContent = 'Erro no conteúdo';
+    }
+    tr.appendChild(tdPreview);
+    
+    // Ações
+    const tdActions = document.createElement('td');
+    tdActions.className = 'table-cell';
+    
+    const actionsDiv = document.createElement('div');
+    actionsDiv.className = 'flex gap-2';
+    
+    // Botão toggle
+    const toggleBtn = document.createElement('button');
+    toggleBtn.className = 'text-xs px-2 py-1 rounded bg-zinc-700 hover:bg-zinc-600';
+    toggleBtn.textContent = downsell.active ? '⏸️' : '▶️';
+    toggleBtn.title = downsell.active ? 'Desativar' : 'Ativar';
+    toggleBtn.onclick = () => toggleDownsell(downsell.id);
+    actionsDiv.appendChild(toggleBtn);
+    
+    // Botão editar
+    const editBtn = document.createElement('button');
+    editBtn.className = 'text-xs px-2 py-1 rounded bg-blue-700 hover:bg-blue-600';
+    editBtn.textContent = '✏️';
+    editBtn.title = 'Editar';
+    editBtn.onclick = () => openDownsellFormModal(currentDownsellsSlug, downsell.id);
+    actionsDiv.appendChild(editBtn);
+    
+    // Botão deletar
+    const deleteBtn = document.createElement('button');
+    deleteBtn.className = 'text-xs px-2 py-1 rounded bg-red-700 hover:bg-red-600';
+    deleteBtn.textContent = '🗑️';
+    deleteBtn.title = 'Deletar';
+    deleteBtn.onclick = () => deleteDownsell(downsell.id);
+    actionsDiv.appendChild(deleteBtn);
+    
+    tdActions.appendChild(actionsDiv);
+    tr.appendChild(tdActions);
+    
+    return tr;
+  }
+
+  function updateDownsellsCount() {
+    const countEl = document.getElementById('downsells-count');
+    if (countEl) {
+      const filtered = downsellsSearchTerm 
+        ? currentDownsells.filter(d => {
+            const term = downsellsSearchTerm.toLowerCase();
+            const name = (d.name || '').toLowerCase();
+            const content = JSON.stringify(d.content || {}).toLowerCase();
+            return name.includes(term) || content.includes(term);
+          })
+        : currentDownsells;
+      countEl.textContent = filtered.length;
+    }
+  }
+
+  async function openDownsellFormModal(slug, downsellId = null) {
+    console.log('[DOWNSELLS][OPEN_FORM]', { slug, downsellId });
+    currentEditingDownsellId = downsellId;
+    
+    const modal = document.getElementById('downsell-form-modal');
+    const overlay = document.getElementById('modal-overlay');
+    const title = document.getElementById('downsell-form-modal-title');
+    
+    if (!modal || !overlay) {
+      console.error('[DOWNSELLS][FORM_MODAL_NOT_FOUND]');
+      return;
+    }
+    
+    title.textContent = downsellId ? 'Editar Downsell' : 'Novo Downsell';
+    
+    // Limpar formulário
+    document.getElementById('downsell-title').value = '';
+    document.getElementById('downsell-copy').value = '';
+    const mediaTypeEl = document.getElementById('downsell-media-type');
+    if (mediaTypeEl) mediaTypeEl.value = 'none';
+    const fileIdEl = document.getElementById('downsell-file-id');
+    if (fileIdEl) fileIdEl.value = '';
+    const captionEl = document.getElementById('downsell-caption');
+    if (captionEl) captionEl.value = '';
+    document.getElementById('downsell-delay').value = '20';
+    document.getElementById('downsell-active').checked = true;
+    document.getElementById('downsell-after-start').checked = true;
+    document.getElementById('downsell-after-pix').checked = false;
+    
+    // Se editando, carregar dados
+    if (downsellId) {
+      const downsell = currentDownsells.find(d => d.id === downsellId);
+      if (downsell) {
+        document.getElementById('downsell-title').value = downsell.name || '';
+        
+        try {
+          const content = typeof downsell.content === 'string' ? JSON.parse(downsell.content) : downsell.content;
+          document.getElementById('downsell-copy').value = content.text || '';
+          
+          const fileIdEl = document.getElementById('downsell-file-id');
+          const mediaIdEl = document.getElementById('downsell-media-id');
+          const sha256El = document.getElementById('downsell-media-sha256');
+          const r2KeyEl = document.getElementById('downsell-media-r2-key');
+          const kindEl = document.getElementById('downsell-media-kind');
+          const captionEl = document.getElementById('downsell-caption');
+          const mediaTypeEl = document.getElementById('downsell-media-type');
+          
+          // Carregar mídia se houver (novo formato estruturado)
+          if (content.media) {
+            const media = content.media;
+            if (fileIdEl) fileIdEl.value = media.file_id || '';
+            if (mediaIdEl) mediaIdEl.value = media.media_id || '';
+            if (sha256El) sha256El.value = media.sha256 || '';
+            if (r2KeyEl) r2KeyEl.value = media.r2_key || '';
+            if (kindEl) kindEl.value = media.kind || '';
+            if (captionEl) captionEl.value = content.caption || '';
+            if (mediaTypeEl) mediaTypeEl.value = media.kind || 'none';
+            
+            // Mostrar preview
+            if (media.file_id && media.kind) {
+              const selectedDiv = document.getElementById('downsell-selected-media');
+              const thumb = document.getElementById('downsell-media-thumb');
+              const nameEl = document.getElementById('downsell-media-name');
+              const infoEl = document.getElementById('downsell-media-info');
+              
+              if (selectedDiv) selectedDiv.classList.remove('hidden');
+              if (thumb && media.media_id) thumb.src = `${baseUrl}/api/media/preview/${media.media_id}`;
+              if (nameEl) nameEl.textContent = media.r2_key ? media.r2_key.split('/').pop() : 'Mídia selecionada';
+              if (infoEl) infoEl.textContent = `${media.kind}`;
+              
+              const mediaFields = document.getElementById('downsell-media-fields');
+              if (mediaFields) mediaFields.classList.remove('hidden');
+            }
+          } 
+          // Fallback para formato antigo
+          else if (content.video_file_id || content.photo_file_id) {
+            if (fileIdEl) fileIdEl.value = content.video_file_id || content.photo_file_id || '';
+            if (captionEl) captionEl.value = content.caption || '';
+            if (mediaTypeEl) {
+              mediaTypeEl.value = content.video_file_id ? 'video' : 'photo';
+            }
+          } else {
+            if (mediaTypeEl) mediaTypeEl.value = 'none';
+          }
+        } catch (err) {
+          console.error('[DOWNSELLS][PARSE_CONTENT]', err);
+        }
+        
+        const delayMinutes = downsell.delay_minutes || Math.round((downsell.delay_seconds || 0) / 60);
+        document.getElementById('downsell-delay').value = delayMinutes;
+        document.getElementById('downsell-active').checked = downsell.active !== false;
+        document.getElementById('downsell-after-start').checked = downsell.after_start !== false;
+        document.getElementById('downsell-after-pix').checked = downsell.after_pix === true;
+      }
+    }
+    
+    // Atualizar contadores
+    updateDownsellFormCounters();
+    
+    modal.classList.remove('hidden');
+    overlay.classList.remove('hidden');
+  }
+
+  function updateDownsellFormCounters() {
+    const titleInput = document.getElementById('downsell-title');
+    const copyInput = document.getElementById('downsell-copy');
+    const titleCount = document.getElementById('downsell-title-count');
+    const copyCount = document.getElementById('downsell-copy-count');
+    
+    if (titleInput && titleCount) {
+      titleCount.textContent = titleInput.value.length;
+    }
+    if (copyInput && copyCount) {
+      copyCount.textContent = copyInput.value.length;
+    }
+  }
+
+  async function saveDownsell() {
+    if (!currentDownsellsSlug) {
+      showToast('error', 'Slug não encontrado');
+      return;
+    }
+    
+    const title = document.getElementById('downsell-title').value.trim();
+    const copy = document.getElementById('downsell-copy').value.trim();
+    const mediaTypeEl = document.getElementById('downsell-media-type');
+    const mediaType = mediaTypeEl ? mediaTypeEl.value : 'none';
+    const fileIdEl = document.getElementById('downsell-file-id');
+    const fileId = fileIdEl ? fileIdEl.value.trim() : '';
+    const captionEl = document.getElementById('downsell-caption');
+    const caption = captionEl ? captionEl.value.trim() : '';
+    const delayMinutes = parseInt(document.getElementById('downsell-delay').value, 10);
+    const active = document.getElementById('downsell-active').checked;
+    const afterStart = document.getElementById('downsell-after-start').checked;
+    const afterPix = document.getElementById('downsell-after-pix').checked;
+    
+    // Validações
+    if (!title) {
+      showToast('error', 'Título obrigatório');
+      return;
+    }
+    
+    if (!copy) {
+      showToast('error', 'Texto obrigatório');
+      return;
+    }
+    
+    if (copy.length > 4096) {
+      showToast('error', 'Texto muito longo (máx 4096)');
+      return;
+    }
+    
+    if (!afterStart && !afterPix) {
+      showToast('error', 'Selecione ao menos um gatilho (START ou PIX)');
+      return;
+    }
+    
+    if (isNaN(delayMinutes) || delayMinutes < 1) {
+      showToast('error', 'Delay inválido (mínimo 1 minuto)');
+      return;
+    }
+    
+    // Dados de mídia (se selecionada)
+    const mediaId = document.getElementById('downsell-media-id')?.value || '';
+    const sha256 = document.getElementById('downsell-media-sha256')?.value || '';
+    const r2Key = document.getElementById('downsell-media-r2-key')?.value || '';
+    const kind = document.getElementById('downsell-media-kind')?.value || '';
+    
+    // Montar content
+    const content = {
+      text: copy,
+      parse_mode: 'MarkdownV2'
+    };
+    
+    // Adicionar mídia se selecionada (novo formato estruturado)
+    if (mediaType !== 'none' && fileId && sha256 && kind && r2Key) {
+      content.media = {
+        file_id: fileId,
+        media_id: mediaId ? parseInt(mediaId) : undefined,
+        sha256,
+        kind,
+        r2_key: r2Key
+      };
+      
+      // Manter compatibilidade com formato antigo (se necessário)
+      if (mediaType === 'video') {
+        content.video_file_id = fileId;
+      } else if (mediaType === 'photo') {
+        content.photo_file_id = fileId;
+      }
+      if (caption) {
+        content.caption = caption;
+      }
+    }
+    
+    const payload = {
+      name: title,
+      content: JSON.stringify(content),
+      delay_minutes: delayMinutes,
+      active,
+      after_start: afterStart,
+      after_pix: afterPix
+    };
+    
+    const headers = getAuthHeaders();
+    if (!headers) {
+      showToast('error', 'Token admin não configurado.');
+      return;
+    }
+    
+    try {
+      const isEditing = currentEditingDownsellId !== null;
+      const url = isEditing
+        ? `${baseUrl}/api/admin/bots/${encodeURIComponent(currentDownsellsSlug)}/downsells/${currentEditingDownsellId}`
+        : `${baseUrl}/api/admin/bots/${encodeURIComponent(currentDownsellsSlug)}/downsells`;
+      
+      const response = await fetch(url, {
+        method: isEditing ? 'PUT' : 'POST',
+        headers: {
+          ...headers,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(payload)
+      });
+      
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Falha ao salvar');
+      }
+      
+      showToast('success', isEditing ? 'Downsell atualizado' : 'Downsell criado');
+      
+      closeModal('downsell-form-modal');
+      await loadDownsells(currentDownsellsSlug);
+    } catch (err) {
+      console.error('[DOWNSELLS][SAVE][ERR]', err);
+      showToast('error', `Erro: ${err.message}`);
+    }
+  }
+
+  async function deleteDownsell(downsellId) {
+    if (!currentDownsellsSlug) return;
+    
+    const downsell = currentDownsells.find(d => d.id === downsellId);
+    const name = downsell?.name || 'este downsell';
+    
+    if (!confirm(`Tem certeza que deseja deletar "${name}"? Esta ação não pode ser desfeita.`)) {
+      return;
+    }
+    
+    const headers = getAuthHeaders();
+    if (!headers) {
+      showToast('error', 'Token admin não configurado.');
+      return;
+    }
+    
+    try {
+      const response = await fetch(
+        `${baseUrl}/api/admin/bots/${encodeURIComponent(currentDownsellsSlug)}/downsells/${downsellId}`,
+        {
+          method: 'DELETE',
+          headers
+        }
+      );
+      
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Falha ao deletar');
+      }
+      
+      showToast('success', 'Downsell deletado');
+      await loadDownsells(currentDownsellsSlug);
+    } catch (err) {
+      console.error('[DOWNSELLS][DELETE][ERR]', err);
+      showToast('error', `Erro: ${err.message}`);
+    }
+  }
+
+  async function toggleDownsell(downsellId) {
+    if (!currentDownsellsSlug) return;
+    
+    const headers = getAuthHeaders();
+    if (!headers) {
+      showToast('error', 'Token admin não configurado.');
+      return;
+    }
+    
+    try {
+      const response = await fetch(
+        `${baseUrl}/api/admin/bots/${encodeURIComponent(currentDownsellsSlug)}/downsells/${downsellId}/toggle`,
+        {
+          method: 'PATCH',
+          headers
+        }
+      );
+      
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Falha ao alternar status');
+      }
+      
+      const data = await response.json();
+      const newStatus = data.downsell?.active ? 'ativado' : 'desativado';
+      showToast('success', `Downsell ${newStatus}`);
+      
+      // Atualizar localmente
+      const index = currentDownsells.findIndex(d => d.id === downsellId);
+      if (index >= 0) {
+        currentDownsells[index] = data.downsell;
+        renderDownsellsTable(currentDownsells);
+      }
+    } catch (err) {
+      console.error('[DOWNSELLS][TOGGLE][ERR]', err);
+      showToast('error', `Erro: ${err.message}`);
+    }
+  }
+
+  // ========== FUNÇÕES DE DISPAROS (SHOTS) ==========
+
+  /**
+   * Função auxiliar para escapar caracteres especiais do MarkdownV2
+   */
+  function escapeMarkdownV2(text) {
+    if (!text) return '';
+    const specialChars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!'];
+    let escaped = String(text);
+    specialChars.forEach(char => {
+      escaped = escaped.split(char).join('\\' + char);
+    });
+    return escaped;
+  }
+
+  /**
+   * Gera opções de horário de 15 em 15 minutos
+   */
+  function generateTimeOptions() {
+    const options = [];
+    for (let h = 0; h < 24; h++) {
+      for (let m = 0; m < 60; m += 15) {
+        const hour = String(h).padStart(2, '0');
+        const minute = String(m).padStart(2, '0');
+        options.push(`${hour}:${minute}`);
+      }
+    }
+    return options;
+  }
+
+  /**
+   * Popula o select de horário com opções de 15 em 15 minutos
+   */
+  function populateTimeSelect(selectId) {
+    const select = document.getElementById(selectId);
+    if (!select) return;
+    
+    const options = generateTimeOptions();
+    select.innerHTML = '';
+    
+    options.forEach(time => {
+      const option = document.createElement('option');
+      option.value = time;
+      option.textContent = time;
+      select.appendChild(option);
+    });
+  }
+
+  /**
+   * Abre o modal de gerenciamento de disparos
+   */
+  async function openShotsModal(slug) {
+    console.log('[SHOTS][OPEN_MODAL]', { slug });
+    currentShotsSlug = slug;
+    setCurrentMediaBotSlug(slug); // Para o seletor de mídia
+    
+    const modal = document.getElementById('shots-modal');
+    const overlay = document.getElementById('modal-overlay');
+    
+    if (!modal || !overlay) {
+      console.error('[SHOTS][MODAL_NOT_FOUND]');
+      return;
+    }
+
+    modal.classList.remove('hidden');
+    overlay.classList.remove('hidden');
+    
+    await loadShots(slug);
+  }
+
+  /**
+   * Carrega a lista de disparos do backend
+   */
+  async function loadShots(slug) {
+    const loadingEl = document.getElementById('shots-loading');
+    const emptyEl = document.getElementById('shots-empty');
+    const errorEl = document.getElementById('shots-error');
+    const tableWrapper = document.getElementById('shots-table-wrapper');
+    
+    // Mostrar loading
+    loadingEl?.classList.remove('hidden');
+    emptyEl?.classList.add('hidden');
+    errorEl?.classList.add('hidden');
+    tableWrapper?.classList.add('hidden');
+    
+    const headers = getAuthHeaders();
+    if (!headers) {
+      showToast('error', 'Token admin não configurado.');
+      errorEl?.classList.remove('hidden');
+      loadingEl?.classList.add('hidden');
+      return;
+    }
+    
+    try {
+      const response = await fetch(`${baseUrl}/api/admin/bots/${encodeURIComponent(slug)}/shots`, {
+        headers
+      });
+      
+      if (!response.ok) throw new Error('Falha ao carregar disparos');
+      
+      const data = await response.json();
+      currentShots = data.shots || [];
+      
+      console.log('[SHOTS][LOADED]', { count: currentShots.length });
+      
+      if (currentShots.length === 0) {
+        emptyEl?.classList.remove('hidden');
+        loadingEl?.classList.add('hidden');
+      } else {
+        renderShotsTable(currentShots);
+        tableWrapper?.classList.remove('hidden');
+        loadingEl?.classList.add('hidden');
+      }
+      
+      updateShotsCount();
+    } catch (err) {
+      console.error('[SHOTS][LOAD][ERR]', err);
+      errorEl?.classList.remove('hidden');
+      loadingEl?.classList.add('hidden');
+      showToast('error', 'Erro ao carregar disparos');
+    }
+  }
+
+  /**
+   * Renderiza a tabela de disparos
+   */
+  function renderShotsTable(shots) {
+    const tbody = document.getElementById('shots-table-body');
+    if (!tbody) return;
+    
+    tbody.innerHTML = '';
+    
+    // Filtrar por busca
+    let filtered = shots;
+    if (shotsSearchTerm) {
+      const term = shotsSearchTerm.toLowerCase();
+      filtered = shots.filter(s => {
+        const title = (s.title || '').toLowerCase();
+        const message = JSON.stringify(s.message || {}).toLowerCase();
+        return title.includes(term) || message.includes(term);
+      });
+    }
+    
+    if (filtered.length === 0 && shotsSearchTerm) {
+      tbody.innerHTML = '<tr><td colspan="6" class="table-cell text-center text-zinc-500">Nenhum resultado encontrado</td></tr>';
+      return;
+    }
+    
+    filtered.forEach(shot => {
+      tbody.appendChild(renderShotRow(shot));
+    });
+  }
+
+  /**
+   * Renderiza uma linha individual da tabela de disparos
+   */
+  function renderShotRow(shot) {
+    const tr = document.createElement('tr');
+    tr.className = 'hover:bg-surfaceMuted/50 transition-colors';
+    
+    // Título
+    const tdTitle = document.createElement('td');
+    tdTitle.className = 'table-cell';
+    const titleDiv = document.createElement('div');
+    titleDiv.className = 'flex flex-col gap-1';
+    const titleText = document.createElement('span');
+    titleText.className = 'font-medium text-zinc-200';
+    titleText.textContent = shot.title || 'Sem título';
+    titleDiv.appendChild(titleText);
+    
+    // Adicionar ícone se inativo
+    if (shot.active === false) {
+      const inactiveSpan = document.createElement('span');
+      inactiveSpan.className = 'text-xs text-zinc-500';
+      inactiveSpan.textContent = '⏸️ Inativo';
+      titleDiv.appendChild(inactiveSpan);
+    }
+    tdTitle.appendChild(titleDiv);
+    tr.appendChild(tdTitle);
+    
+    // Status
+    const tdStatus = document.createElement('td');
+    tdStatus.className = 'table-cell';
+    const statusMap = {
+      'draft': { label: 'Draft', color: 'bg-zinc-700 text-zinc-400', icon: '📝' },
+      'scheduled': { label: 'Agendado', color: 'bg-blue-900/30 text-blue-300 border border-blue-700/30', icon: '📅' },
+      'sending': { label: 'Enviando', color: 'bg-yellow-900/30 text-yellow-300 border border-yellow-700/30', icon: '⚡' },
+      'sent': { label: 'Concluído', color: 'bg-green-900/30 text-green-300 border border-green-700/30', icon: '✅' },
+      'cancelled': { label: 'Cancelado', color: 'bg-red-900/30 text-red-300 border border-red-700/30', icon: '❌' }
+    };
+    const statusInfo = statusMap[shot.status] || statusMap['draft'];
+    const statusSpan = document.createElement('span');
+    statusSpan.className = `inline-flex items-center gap-1 px-2 py-1 text-xs rounded-lg ${statusInfo.color}`;
+    statusSpan.innerHTML = `${statusInfo.icon} ${statusInfo.label}`;
+    tdStatus.appendChild(statusSpan);
+    tr.appendChild(tdStatus);
+    
+    // Horário/Agendamento
+    const tdSchedule = document.createElement('td');
+    tdSchedule.className = 'table-cell text-sm text-zinc-300';
+    if (shot.scheduled_at) {
+      try {
+        const scheduleDate = new Date(shot.scheduled_at);
+        if (!isNaN(scheduleDate.getTime())) {
+          const formattedDate = scheduleDate.toLocaleString('pt-BR', {
+            day: '2-digit',
+            month: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit'
+          });
+          tdSchedule.innerHTML = `📅 ${formattedDate}`;
+        } else {
+          tdSchedule.textContent = 'Data inválida';
+        }
+      } catch {
+        tdSchedule.textContent = 'Data inválida';
+      }
+    } else {
+      tdSchedule.innerHTML = '⚡ Imediato';
+    }
+    tr.appendChild(tdSchedule);
+    
+    // Audiência (filtros)
+    const tdAudience = document.createElement('td');
+    tdAudience.className = 'table-cell text-xs text-zinc-400';
+    try {
+      const filters = shot.filters ? (typeof shot.filters === 'string' ? JSON.parse(shot.filters) : shot.filters) : {};
+      const filterLabels = [];
+      if (filters.all_started) filterLabels.push('Todos');
+      if (filters.has_unpaid_pix) filterLabels.push('PIX aberto');
+      if (filters.exclude_paid) filterLabels.push('Exclui pagos');
+      tdAudience.textContent = filterLabels.length > 0 ? filterLabels.join(' • ') : 'Todos';
+    } catch {
+      tdAudience.textContent = 'Todos';
+    }
+    tr.appendChild(tdAudience);
+    
+    // Progresso
+    const tdProgress = document.createElement('td');
+    tdProgress.className = 'table-cell text-xs';
+    const sent = shot.sent_count || 0;
+    const total = shot.total_targets || 0;
+    if (total > 0) {
+      const percent = Math.round((sent / total) * 100);
+      tdProgress.innerHTML = `<div class="flex flex-col gap-1"><span class="text-zinc-300">${sent}/${total}</span><span class="text-zinc-500">${percent}%</span></div>`;
+    } else {
+      tdProgress.innerHTML = '<span class="text-zinc-500">—</span>';
+    }
+    tr.appendChild(tdProgress);
+    
+    // Ações
+    const tdActions = document.createElement('td');
+    tdActions.className = 'table-cell';
+    
+    const actionsDiv = document.createElement('div');
+    actionsDiv.className = 'flex gap-2';
+    
+    // Botão preview
+    const previewBtn = document.createElement('button');
+    previewBtn.className = 'text-xs px-2 py-1 rounded-lg bg-zinc-700 hover:bg-zinc-600 transition-colors';
+    previewBtn.textContent = '👁️';
+    previewBtn.title = 'Preview';
+    previewBtn.onclick = () => {
+      try {
+        const message = typeof shot.message === 'string' ? JSON.parse(shot.message) : shot.message;
+        showShotPreview(message.text || '');
+      } catch (err) {
+        showToast('error', 'Erro ao carregar preview');
+      }
+    };
+    actionsDiv.appendChild(previewBtn);
+    
+    // Botão editar (apenas draft ou scheduled)
+    if (shot.status === 'draft' || shot.status === 'scheduled') {
+      const editBtn = document.createElement('button');
+      editBtn.className = 'text-xs px-2 py-1 rounded-lg bg-blue-700 hover:bg-blue-600 transition-colors';
+      editBtn.textContent = '✏️';
+      editBtn.title = 'Editar';
+      editBtn.onclick = () => openShotFormModal(currentShotsSlug, shot.id);
+      actionsDiv.appendChild(editBtn);
+    }
+    
+    // Botão deletar (apenas draft ou scheduled)
+    if (shot.status === 'draft' || shot.status === 'scheduled') {
+      const deleteBtn = document.createElement('button');
+      deleteBtn.className = 'text-xs px-2 py-1 rounded-lg bg-red-700 hover:bg-red-600 transition-colors';
+      deleteBtn.textContent = '🗑️';
+      deleteBtn.title = 'Excluir';
+      deleteBtn.onclick = () => deleteShot(shot.id);
+      actionsDiv.appendChild(deleteBtn);
+    }
+    
+    tdActions.appendChild(actionsDiv);
+    tr.appendChild(tdActions);
+    
+    return tr;
+  }
+
+  /**
+   * Atualiza o contador de disparos exibidos
+   */
+  function updateShotsCount() {
+    const countEl = document.getElementById('shots-count');
+    if (countEl) {
+      const filtered = shotsSearchTerm 
+        ? currentShots.filter(s => {
+            const term = shotsSearchTerm.toLowerCase();
+            const title = (s.title || '').toLowerCase();
+            const message = JSON.stringify(s.message || {}).toLowerCase();
+            return title.includes(term) || message.includes(term);
+          })
+        : currentShots;
+      countEl.textContent = filtered.length;
+    }
+  }
+
+  /**
+   * Abre o modal de formulário de disparo (criar/editar)
+   */
+  async function openShotFormModal(slug, shotId = null) {
+    console.log('[SHOTS][OPEN_FORM]', { slug, shotId });
+    currentEditingShotId = shotId;
+    
+    const modal = document.getElementById('shot-form-modal');
+    const overlay = document.getElementById('modal-overlay');
+    const title = document.getElementById('shot-form-modal-title');
+    
+    if (!modal || !overlay) {
+      console.error('[SHOTS][FORM_MODAL_NOT_FOUND]');
+      return;
+    }
+    
+    title.textContent = shotId ? 'Editar Disparo' : 'Novo Disparo';
+    
+    // Popula select de horário de agendamento
+    populateTimeSelect('shot-schedule-time');
+    
+    // Limpar formulário
+    const titleInput = document.getElementById('shot-title');
+    const messageInput = document.getElementById('shot-message-text');
+    const mediaTypeEl = document.getElementById('shot-media-type');
+    const fileIdInput = document.getElementById('shot-file-id');
+    const activeCheckbox = document.getElementById('shot-active');
+    
+    if (titleInput) titleInput.value = '';
+    if (messageInput) messageInput.value = '';
+    if (mediaTypeEl) mediaTypeEl.value = 'none';
+    if (fileIdInput) fileIdInput.value = '';
+    if (activeCheckbox) activeCheckbox.checked = true;
+    
+    // Ocultar campos de mídia
+    const mediaFields = document.getElementById('shot-media-fields');
+    if (mediaFields) mediaFields.classList.add('hidden');
+    
+    // Resetar trigger para "enviar agora"
+    const triggerNow = document.getElementById('shot-trigger-now');
+    if (triggerNow) triggerNow.checked = true;
+    
+    // Ocultar campos de agendamento
+    const scheduleFields = document.getElementById('shot-schedule-fields');
+    if (scheduleFields) scheduleFields.classList.add('hidden');
+    
+    // Limpar resumo e warnings de agendamento
+    const summaryEl = document.getElementById('shot-schedule-summary');
+    const warningEl = document.getElementById('shot-schedule-warning');
+    if (summaryEl) summaryEl.textContent = '';
+    if (warningEl) warningEl.classList.add('hidden');
+    
+    // Resetar filtros de audiência
+    const filterAllStarted = document.getElementById('shot-filter-all-started');
+    const filterHasUnpaidPix = document.getElementById('shot-filter-has-unpaid-pix');
+    const filterExcludePaid = document.getElementById('shot-filter-exclude-paid');
+    
+    if (filterAllStarted) filterAllStarted.checked = true;
+    if (filterHasUnpaidPix) filterHasUnpaidPix.checked = false;
+    if (filterExcludePaid) filterExcludePaid.checked = true;
+    
+    // Limpar resultado de teste
+    const testResult = document.getElementById('shot-test-result');
+    if (testResult) {
+      testResult.classList.add('hidden');
+      testResult.textContent = '';
+    }
+    
+    // Se editando, carregar dados
+    if (shotId) {
+      const shot = currentShots.find(s => s.id === shotId);
+      if (shot) {
+        if (titleInput) titleInput.value = shot.title || '';
+        
+        try {
+          const message = typeof shot.message === 'string' ? JSON.parse(shot.message) : shot.message;
+          if (messageInput) messageInput.value = message.text || '';
+          
+          // Carregar mídia
+          if (message.video_file_id || message.photo_file_id) {
+            if (mediaTypeEl) {
+              mediaTypeEl.value = message.video_file_id ? 'video' : 'photo';
+            }
+            if (fileIdInput) {
+              fileIdInput.value = message.video_file_id || message.photo_file_id || '';
+            }
+            // Mostrar campos de mídia
+            if (mediaFields) mediaFields.classList.remove('hidden');
+          } else {
+            if (mediaTypeEl) mediaTypeEl.value = 'none';
+          }
+        } catch (err) {
+          console.error('[SHOTS][PARSE_MESSAGE]', err);
+        }
+        
+        // Carregar campo ativo
+        if (activeCheckbox) {
+          activeCheckbox.checked = shot.active !== false;
+        }
+        
+        // Carregar filtros
+        try {
+          const filters = typeof shot.filters === 'string' ? JSON.parse(shot.filters) : shot.filters || {};
+          if (filterAllStarted) filterAllStarted.checked = filters.all_started === true;
+          if (filterHasUnpaidPix) filterHasUnpaidPix.checked = filters.has_unpaid_pix === true;
+          if (filterExcludePaid) filterExcludePaid.checked = filters.exclude_paid === true;
+        } catch (err) {
+          console.error('[SHOTS][PARSE_FILTERS]', err);
+        }
+        
+        // Se tem scheduled_at e trigger === 'schedule', é agendado
+        if (shot.trigger === 'schedule' && shot.scheduled_at) {
+          const triggerSchedule = document.getElementById('shot-trigger-schedule');
+          if (triggerSchedule) triggerSchedule.checked = true;
+          if (scheduleFields) scheduleFields.classList.remove('hidden');
+          
+          // Parse scheduled_at (formato ISO)
+          const scheduleDate = new Date(shot.scheduled_at);
+          const dateInput = document.getElementById('shot-schedule-date');
+          const timeSelect = document.getElementById('shot-schedule-time');
+          
+          if (dateInput && !isNaN(scheduleDate.getTime())) {
+            const year = scheduleDate.getFullYear();
+            const month = String(scheduleDate.getMonth() + 1).padStart(2, '0');
+            const day = String(scheduleDate.getDate()).padStart(2, '0');
+            dateInput.value = `${year}-${month}-${day}`;
+          }
+          
+          if (timeSelect && !isNaN(scheduleDate.getTime())) {
+            const hour = String(scheduleDate.getHours()).padStart(2, '0');
+            const minute = String(scheduleDate.getMinutes()).padStart(2, '0');
+            timeSelect.value = `${hour}:${minute}`;
+          }
+        }
+      }
+    }
+    
+    // Atualizar contadores
+    updateShotFormCounters();
+    
+    modal.classList.remove('hidden');
+    overlay.classList.remove('hidden');
+  }
+
+  /**
+   * Atualiza contadores de caracteres no formulário de disparo
+   */
+  function updateShotFormCounters() {
+    const titleInput = document.getElementById('shot-title');
+    const messageInput = document.getElementById('shot-message-text');
+    const titleCount = document.getElementById('shot-title-count');
+    const messageCount = document.getElementById('shot-message-count');
+    
+    if (titleInput && titleCount) {
+      titleCount.textContent = titleInput.value.length;
+    }
+    if (messageInput && messageCount) {
+      messageCount.textContent = messageInput.value.length;
+    }
+  }
+
+  /**
+   * Valida e salva o disparo
+   */
+  async function saveShot() {
+    if (!currentShotsSlug) {
+      showToast('error', 'Slug não encontrado');
+      return;
+    }
+    
+    const titleInput = document.getElementById('shot-title');
+    const messageInput = document.getElementById('shot-message-text');
+    const mediaTypeEl = document.getElementById('shot-media-type');
+    const fileIdInput = document.getElementById('shot-file-id');
+    const activeCheckbox = document.getElementById('shot-active');
+    const triggerNow = document.getElementById('shot-trigger-now');
+    const triggerSchedule = document.getElementById('shot-trigger-schedule');
+    const scheduleDateInput = document.getElementById('shot-schedule-date');
+    const scheduleTimeSelect = document.getElementById('shot-schedule-time');
+    const filterAllStarted = document.getElementById('shot-filter-all-started');
+    const filterHasUnpaidPix = document.getElementById('shot-filter-has-unpaid-pix');
+    const filterExcludePaid = document.getElementById('shot-filter-exclude-paid');
+    
+    if (!titleInput || !messageInput) {
+      showToast('error', 'Campos obrigatórios não encontrados');
+      return;
+    }
+    
+    const title = titleInput.value.trim();
+    const message = messageInput.value.trim();
+    const mediaType = mediaTypeEl ? mediaTypeEl.value : 'none';
+    const fileId = fileIdInput ? fileIdInput.value.trim() : '';
+    const active = activeCheckbox ? activeCheckbox.checked : true;
+    
+    // Validações básicas
+    if (!title) {
+      showToast('error', 'Título obrigatório');
+      return;
+    }
+    
+    if (!message) {
+      showToast('error', 'Mensagem obrigatória');
+      return;
+    }
+    
+    if (message.length > 4096) {
+      showToast('error', 'Mensagem muito longa (máx 4096)');
+      return;
+    }
+    
+    // Validar mídia se selecionada
+    if (mediaType !== 'none' && !fileId) {
+      showToast('error', 'Informe o File ID da mídia ou selecione "Nenhuma"');
+      return;
+    }
+    
+    // Dados de mídia (se selecionada)
+    const mediaId = document.getElementById('shot-media-id')?.value || '';
+    const sha256 = document.getElementById('shot-media-sha256')?.value || '';
+    const r2Key = document.getElementById('shot-media-r2-key')?.value || '';
+    const kind = document.getElementById('shot-media-kind')?.value || '';
+    
+    // Montar objeto de mensagem
+    const messageObj = {
+      text: message,
+      parse_mode: 'MarkdownV2'
+    };
+    
+    // Adicionar mídia se selecionada (novo formato estruturado)
+    if (mediaType !== 'none' && fileId && sha256 && kind && r2Key) {
+      messageObj.media = {
+        file_id: fileId,
+        media_id: mediaId ? parseInt(mediaId) : undefined,
+        sha256,
+        kind,
+        r2_key: r2Key
+      };
+      
+      // Manter compatibilidade com formato antigo (se necessário)
+      if (mediaType === 'video') {
+        messageObj.video_file_id = fileId;
+      } else if (mediaType === 'photo') {
+        messageObj.photo_file_id = fileId;
+      }
+    }
+    
+    // Montar payload base (padronizado com downsells - envia content como string JSON)
+    const payload = {
+      title: title,
+      content: JSON.stringify(messageObj),  // ✅ Convertendo para JSON aqui (como downsells)
+      trigger: 'now', // Default
+      active: active
+    };
+    
+    // Debug: log do payload antes de enviar
+    console.log('[SHOTS][SAVE][PAYLOAD]', {
+      title,
+      message,
+      messageObj,
+      content: payload.content,
+      active,
+      payload
+    });
+    
+    // Determinar trigger e scheduled_at
+    if (triggerSchedule && triggerSchedule.checked) {
+      // Agendado
+      if (!scheduleDateInput || !scheduleTimeSelect) {
+        showToast('error', 'Campos de agendamento não encontrados');
+        return;
+      }
+      
+      const scheduleDate = scheduleDateInput.value;
+      const scheduleTime = scheduleTimeSelect.value;
+      
+      if (!scheduleDate || !scheduleTime) {
+        showToast('error', 'Data e hora de agendamento obrigatórias');
+        return;
+      }
+      
+      // Montar timestamp ISO
+      const scheduleDateTime = new Date(`${scheduleDate}T${scheduleTime}:00`);
+      
+      if (isNaN(scheduleDateTime.getTime())) {
+        showToast('error', 'Data/hora inválida');
+        return;
+      }
+      
+      // Verificar se é no futuro
+      if (scheduleDateTime <= new Date()) {
+        showToast('error', 'Data/hora deve ser no futuro');
+        return;
+      }
+      
+      payload.trigger = 'schedule';
+      payload.scheduled_at = scheduleDateTime.toISOString();
+    }
+    
+    // Adicionar filtros de audiência
+    const filters = {};
+    if (filterAllStarted && filterAllStarted.checked) filters.all_started = true;
+    if (filterHasUnpaidPix && filterHasUnpaidPix.checked) filters.has_unpaid_pix = true;
+    if (filterExcludePaid && filterExcludePaid.checked) filters.exclude_paid = true;
+    
+    payload.filters = filters;
+    
+    const headers = getAuthHeaders();
+    if (!headers) {
+      showToast('error', 'Token admin não configurado.');
+      return;
+    }
+    
+    try {
+      const isEditing = currentEditingShotId !== null;
+      const url = isEditing
+        ? `${baseUrl}/api/admin/bots/${encodeURIComponent(currentShotsSlug)}/shots/${currentEditingShotId}`
+        : `${baseUrl}/api/admin/bots/${encodeURIComponent(currentShotsSlug)}/shots`;
+      
+      const response = await fetch(url, {
+        method: isEditing ? 'PUT' : 'POST',
+        headers: {
+          ...headers,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(payload)
+      });
+      
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Falha ao salvar');
+      }
+      
+      const result = await response.json();
+      
+      // Verificar se foi iniciado automaticamente
+      if (result.auto_started) {
+        showToast('success', `Disparo criado e iniciado! Enviando para ${result.shot.total_targets || 0} pessoas...`);
+      } else if (result.auto_start_error) {
+        showToast('warning', `Disparo criado, mas erro ao iniciar: ${result.auto_start_error}`);
+      } else {
+        showToast('success', isEditing ? 'Disparo atualizado' : 'Disparo criado');
+      }
+      
+      closeModal('shot-form-modal');
+      await loadShots(currentShotsSlug);
+    } catch (err) {
+      console.error('[SHOTS][SAVE][ERR]', err);
+      showToast('error', `Erro: ${err.message}`);
+    }
+  }
+
+  /**
+   * Atualiza o resumo de agendamento
+   */
+  function updateShotScheduleSummary() {
+    const dateInput = document.getElementById('shot-schedule-date');
+    const timeSelect = document.getElementById('shot-schedule-time');
+    const summaryEl = document.getElementById('shot-schedule-summary');
+    const warningEl = document.getElementById('shot-schedule-warning');
+    
+    if (!dateInput || !timeSelect || !summaryEl) return;
+    
+    const date = dateInput.value;
+    const time = timeSelect.value;
+    
+    if (!date || !time) {
+      summaryEl.textContent = '';
+      if (warningEl) warningEl.classList.add('hidden');
+      return;
+    }
+    
+    try {
+      const scheduleDateTime = new Date(`${date}T${time}:00`);
+      const now = new Date();
+      
+      if (isNaN(scheduleDateTime.getTime())) {
+        summaryEl.textContent = '';
+        if (warningEl) {
+          warningEl.textContent = '⚠️ Data/hora inválida';
+          warningEl.classList.remove('hidden');
+        }
+        return;
+      }
+      
+      if (scheduleDateTime <= now) {
+        summaryEl.textContent = '';
+        if (warningEl) {
+          warningEl.textContent = '⚠️ A data/hora deve ser no futuro';
+          warningEl.classList.remove('hidden');
+        }
+        return;
+      }
+      
+      // Formatar data/hora em PT-BR
+      const formatted = scheduleDateTime.toLocaleString('pt-BR', {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+      
+      summaryEl.textContent = `Será enviado em: ${formatted}`;
+      if (warningEl) warningEl.classList.add('hidden');
+    } catch (err) {
+      console.error('[SHOTS][SCHEDULE_SUMMARY]', err);
+      summaryEl.textContent = '';
+    }
+  }
+  
+  /**
+   * Mostra preview da mensagem
+   */
+  function showShotPreview(text) {
+    const modal = document.getElementById('shot-preview-modal');
+    const overlay = document.getElementById('modal-overlay');
+    const content = document.getElementById('shot-preview-content');
+    
+    if (!modal || !overlay || !content) {
+      console.error('[SHOTS][PREVIEW] Modal não encontrado');
+      return;
+    }
+    
+    // Escapar MarkdownV2 se necessário
+    const escaped = escapeMarkdownV2(text);
+    content.textContent = escaped;
+    
+    modal.classList.remove('hidden');
+    overlay.classList.remove('hidden');
+  }
+  
+  /**
+   * Envia mensagem de teste
+   */
+  async function sendShotTest() {
+    const chatIdInput = document.getElementById('shot-test-chat-id');
+    const messageInput = document.getElementById('shot-message-text');
+    const resultDiv = document.getElementById('shot-test-result');
+    const sendBtn = document.getElementById('shot-test-send-btn');
+    
+    if (!chatIdInput || !messageInput || !resultDiv) {
+      showToast('error', 'Elementos do formulário não encontrados');
+      return;
+    }
+    
+    const chatId = chatIdInput.value.trim();
+    const message = messageInput.value.trim();
+    
+    if (!chatId) {
+      showToast('warning', 'Informe o Chat ID');
+      chatIdInput.focus();
+      return;
+    }
+    
+    if (!message) {
+      showToast('warning', 'Digite uma mensagem');
+      messageInput.focus();
+      return;
+    }
+    
+    if (!currentShotsSlug) {
+      showToast('error', 'Slug não encontrado');
+      return;
+    }
+    
+    const headers = getAuthHeaders();
+    if (!headers) {
+      showToast('error', 'Token admin não configurado');
+      return;
+    }
+    
+    // Desabilitar botão e mostrar loading
+    if (sendBtn) sendBtn.disabled = true;
+    resultDiv.textContent = 'Enviando...';
+    resultDiv.className = 'mt-2 text-xs text-blue-400';
+    resultDiv.classList.remove('hidden');
+    
+    try {
+      const response = await fetch(`${baseUrl}/api/admin/bots/${encodeURIComponent(currentShotsSlug)}/test-message`, {
+        method: 'POST',
+        headers: {
+          ...headers,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text: message,
+          parse_mode: 'MarkdownV2'
+        })
+      });
+      
+      const data = await response.json();
+      
+      if (response.ok && data.ok) {
+        resultDiv.textContent = '✅ Teste enviado com sucesso!';
+        resultDiv.className = 'mt-2 text-xs text-green-400';
+        showToast('success', 'Teste enviado com sucesso');
+      } else {
+        const errorMsg = data.error || 'Erro desconhecido';
+        resultDiv.textContent = `❌ Erro: ${errorMsg}`;
+        resultDiv.className = 'mt-2 text-xs text-red-400';
+        showToast('error', `Erro ao enviar: ${errorMsg}`);
+      }
+    } catch (err) {
+      console.error('[SHOTS][TEST_SEND]', err);
+      resultDiv.textContent = `❌ Erro: ${err.message}`;
+      resultDiv.className = 'mt-2 text-xs text-red-400';
+      showToast('error', 'Erro ao enviar teste');
+    } finally {
+      if (sendBtn) sendBtn.disabled = false;
+    }
+  }
+
+  /**
+   * Deleta um disparo
+   */
+  async function deleteShot(shotId) {
+    if (!currentShotsSlug) return;
+    
+    const shot = currentShots.find(s => s.id === shotId);
+    const name = shot?.name || 'este disparo';
+    
+    if (!confirm(`Tem certeza que deseja deletar "${name}"? Esta ação não pode ser desfeita.`)) {
+      return;
+    }
+    
+    const headers = getAuthHeaders();
+    if (!headers) {
+      showToast('error', 'Token admin não configurado.');
+      return;
+    }
+    
+    try {
+      const response = await fetch(
+        `${baseUrl}/api/admin/bots/${encodeURIComponent(currentShotsSlug)}/shots/${shotId}`,
+        {
+          method: 'DELETE',
+          headers
+        }
+      );
+      
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Falha ao deletar');
+      }
+      
+      showToast('success', 'Disparo deletado');
+      await loadShots(currentShotsSlug);
+    } catch (err) {
+      console.error('[SHOTS][DELETE][ERR]', err);
+      showToast('error', `Erro: ${err.message}`);
+    }
+  }
+
   async function init() {
     console.log('[ADMIN][INIT] Iniciando Admin SPA...');
     registerEventListeners();
@@ -1997,6 +3524,199 @@
       testBtn.addEventListener('click', testStartMessage);
     }
     
+    // Event listeners para modal de downsells (elementos fixos no HTML)
+    const newDownsellBtn = document.getElementById('new-downsell-btn');
+    if (newDownsellBtn) {
+      newDownsellBtn.addEventListener('click', () => {
+        if (currentDownsellsSlug) {
+          openDownsellFormModal(currentDownsellsSlug);
+        }
+      });
+    }
+    
+    const downsellsSearch = document.getElementById('downsells-search');
+    if (downsellsSearch) {
+      let searchTimeout;
+      downsellsSearch.addEventListener('input', (e) => {
+        clearTimeout(searchTimeout);
+        searchTimeout = setTimeout(() => {
+          downsellsSearchTerm = e.target.value.trim();
+          renderDownsellsTable(currentDownsells);
+          updateDownsellsCount();
+        }, 300);
+      });
+    }
+    
+    const downsellForm = document.getElementById('downsell-form');
+    if (downsellForm) {
+      downsellForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        await saveDownsell();
+      });
+    }
+    
+    // Event listeners para contadores do formulário de downsell
+    const downsellTitle = document.getElementById('downsell-title');
+    if (downsellTitle) {
+      downsellTitle.addEventListener('input', updateDownsellFormCounters);
+    }
+    
+    const downsellCopy = document.getElementById('downsell-copy');
+    if (downsellCopy) {
+      downsellCopy.addEventListener('input', updateDownsellFormCounters);
+    }
+    
+    // Mostrar/ocultar campos de mídia baseado no tipo selecionado
+    const downsellMediaType = document.getElementById('downsell-media-type');
+    if (downsellMediaType) {
+      downsellMediaType.addEventListener('change', (e) => {
+        const mediaFields = document.getElementById('downsell-media-fields');
+        if (mediaFields) {
+          if (e.target.value === 'none') {
+            mediaFields.classList.add('hidden');
+          } else {
+            mediaFields.classList.remove('hidden');
+          }
+        }
+      });
+    }
+    
+    // Event listeners para modal de disparos (shots) - elementos fixos no HTML
+    const newShotBtn = document.getElementById('new-shot-btn');
+    if (newShotBtn) {
+      newShotBtn.addEventListener('click', () => {
+        if (currentShotsSlug) {
+          openShotFormModal(currentShotsSlug);
+        }
+      });
+    }
+    
+    const shotsSearch = document.getElementById('shot-search');
+    if (shotsSearch) {
+      let searchTimeout;
+      shotsSearch.addEventListener('input', (e) => {
+        clearTimeout(searchTimeout);
+        searchTimeout = setTimeout(() => {
+          shotsSearchTerm = e.target.value.trim();
+          renderShotsTable(currentShots);
+          updateShotsCount();
+        }, 300);
+      });
+    }
+    
+    const shotForm = document.getElementById('shot-form');
+    if (shotForm) {
+      shotForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        await saveShot();
+      });
+    }
+    
+    // Event listeners para contadores do formulário de shot
+    const shotTitle = document.getElementById('shot-title');
+    if (shotTitle) {
+      shotTitle.addEventListener('input', updateShotFormCounters);
+    }
+    
+    const shotMessageText = document.getElementById('shot-message-text');
+    if (shotMessageText) {
+      shotMessageText.addEventListener('input', updateShotFormCounters);
+    }
+    
+    // Mostrar/ocultar campos de agendamento baseado no trigger selecionado
+    const triggerNow = document.getElementById('shot-trigger-now');
+    const triggerSchedule = document.getElementById('shot-trigger-schedule');
+    const scheduleFields = document.getElementById('shot-schedule-fields');
+    
+    if (triggerNow && scheduleFields) {
+      triggerNow.addEventListener('change', () => {
+        if (triggerNow.checked) {
+          scheduleFields.classList.add('hidden');
+        }
+      });
+    }
+    
+    if (triggerSchedule && scheduleFields) {
+      triggerSchedule.addEventListener('change', () => {
+        if (triggerSchedule.checked) {
+          scheduleFields.classList.remove('hidden');
+          updateShotScheduleSummary();
+        }
+      });
+    }
+    
+    // Atualizar resumo de agendamento quando data/hora mudar
+    const shotScheduleDate = document.getElementById('shot-schedule-date');
+    const shotScheduleTime = document.getElementById('shot-schedule-time');
+    if (shotScheduleDate) {
+      shotScheduleDate.addEventListener('change', updateShotScheduleSummary);
+    }
+    if (shotScheduleTime) {
+      shotScheduleTime.addEventListener('change', updateShotScheduleSummary);
+    }
+    
+    // Mostrar/ocultar campos de mídia baseado no tipo selecionado (shots)
+    const shotMediaType = document.getElementById('shot-media-type');
+    if (shotMediaType) {
+      shotMediaType.addEventListener('change', (e) => {
+        const mediaFields = document.getElementById('shot-media-fields');
+        if (mediaFields) {
+          if (e.target.value === 'none') {
+            mediaFields.classList.add('hidden');
+          } else {
+            mediaFields.classList.remove('hidden');
+          }
+        }
+      });
+    }
+    
+    // Botão de preview
+    const shotPreviewBtn = document.getElementById('shot-preview-btn');
+    if (shotPreviewBtn) {
+      shotPreviewBtn.addEventListener('click', () => {
+        const messageInput = document.getElementById('shot-message-text');
+        if (messageInput) {
+          const text = messageInput.value.trim();
+          if (!text) {
+            showToast('warning', 'Digite uma mensagem para visualizar');
+            return;
+          }
+          showShotPreview(text);
+        }
+      });
+    }
+    
+    // Botão de limpar
+    const shotClearBtn = document.getElementById('shot-clear-btn');
+    if (shotClearBtn) {
+      shotClearBtn.addEventListener('click', () => {
+        const messageInput = document.getElementById('shot-message-text');
+        if (messageInput && confirm('Limpar toda a mensagem?')) {
+          messageInput.value = '';
+          updateShotFormCounters();
+        }
+      });
+    }
+    
+    // Botão de teste de envio
+    const shotTestSendBtn = document.getElementById('shot-test-send-btn');
+    if (shotTestSendBtn) {
+      shotTestSendBtn.addEventListener('click', async () => {
+        await sendShotTest();
+      });
+    }
+    
+    // Validação: se "PIX aberto" estiver marcado, "Excluir quem já pagou" deve estar marcado
+    const shotFilterHasUnpaidPix = document.getElementById('shot-filter-has-unpaid-pix');
+    const shotFilterExcludePaid = document.getElementById('shot-filter-exclude-paid');
+    if (shotFilterHasUnpaidPix && shotFilterExcludePaid) {
+      shotFilterHasUnpaidPix.addEventListener('change', () => {
+        if (shotFilterHasUnpaidPix.checked) {
+          shotFilterExcludePaid.checked = true;
+        }
+      });
+    }
+    
     try {
       await adminRouter();
       console.log('[ADMIN][INIT] Admin SPA inicializado com sucesso.');
@@ -2005,9 +3725,315 @@
     }
   }
 
+  // ========================================
+  // SELETOR DE MÍDIA
+  // ========================================
+  
+  let currentMediaContext = null; // Para saber qual modal está selecionando
+  let currentMediaBotSlug = null; // Slug do bot atual
+  let mediaCache = [];
+  
+  function initMediaSelector() {
+    // Botões de abrir o seletor
+    const startMediaBtn = document.querySelector('#start-message-select-media-btn');
+    const downsellMediaBtn = document.querySelector('#downsell-select-media-btn');
+    const shotMediaBtn = document.querySelector('#shot-select-media-btn');
+    
+    // Botões de remover mídia selecionada
+    const startRemoveBtn = document.querySelector('#start-message-remove-media');
+    const downsellRemoveBtn = document.querySelector('#downsell-remove-media');
+    const shotRemoveBtn = document.querySelector('#shot-remove-media');
+    
+    // Quando o tipo de mídia muda, mostra/esconde o seletor
+    const startMediaType = document.querySelector('#start-message-media-type');
+    const downsellMediaType = document.querySelector('#downsell-media-type');
+    const shotMediaType = document.querySelector('#shot-media-type');
+    
+    if (startMediaType) {
+      startMediaType.addEventListener('change', (e) => {
+        const selector = document.querySelector('#start-message-media-selector');
+        if (e.target.value !== 'none') {
+          selector?.classList.remove('hidden');
+        } else {
+          selector?.classList.add('hidden');
+        }
+      });
+    }
+    
+    if (downsellMediaType) {
+      downsellMediaType.addEventListener('change', (e) => {
+        const fields = document.querySelector('#downsell-media-fields');
+        if (e.target.value !== 'none') {
+          fields?.classList.remove('hidden');
+        } else {
+          fields?.classList.add('hidden');
+        }
+      });
+    }
+    
+    if (shotMediaType) {
+      shotMediaType.addEventListener('change', (e) => {
+        const fields = document.querySelector('#shot-media-fields');
+        if (e.target.value !== 'none') {
+          fields?.classList.remove('hidden');
+        } else {
+          fields?.classList.add('hidden');
+        }
+      });
+    }
+    
+    // Abrir modal de seleção
+    if (startMediaBtn) {
+      startMediaBtn.addEventListener('click', () => openMediaSelector('start'));
+    }
+    if (downsellMediaBtn) {
+      downsellMediaBtn.addEventListener('click', () => openMediaSelector('downsell'));
+    }
+    if (shotMediaBtn) {
+      shotMediaBtn.addEventListener('click', () => openMediaSelector('shot'));
+    }
+    
+    // Remover mídia selecionada
+    if (startRemoveBtn) {
+      startRemoveBtn.addEventListener('click', () => clearMediaSelection('start'));
+    }
+    if (downsellRemoveBtn) {
+      downsellRemoveBtn.addEventListener('click', () => clearMediaSelection('downsell'));
+    }
+    if (shotRemoveBtn) {
+      shotRemoveBtn.addEventListener('click', () => clearMediaSelection('shot'));
+    }
+    
+    // Busca e filtro
+    const searchInput = document.querySelector('#media-search');
+    const typeFilter = document.querySelector('#media-type-filter');
+    
+    if (searchInput) {
+      searchInput.addEventListener('input', filterMediaGrid);
+    }
+    if (typeFilter) {
+      typeFilter.addEventListener('change', filterMediaGrid);
+    }
+  }
+  
+  async function openMediaSelector(context) {
+    currentMediaContext = context;
+    const modal = document.querySelector('#media-selector-modal');
+    const grid = document.querySelector('#media-grid');
+    const loading = document.querySelector('#media-loading');
+    const emptyState = document.querySelector('#media-empty-state');
+    
+    if (!modal || !grid) return;
+    
+    // Mostrar modal
+    modal.classList.remove('hidden');
+    loading?.classList.remove('hidden');
+    grid.classList.add('hidden');
+    emptyState?.classList.add('hidden');
+    
+    try {
+      // Buscar mídias do bot atual
+      const botSlug = getCurrentBotSlug();
+      if (!botSlug) {
+        showToast('Nenhum bot selecionado', 'error');
+        closeModal('media-selector-modal');
+        return;
+      }
+      
+      console.log('[MEDIA-SELECTOR] Buscando mídias para:', botSlug);
+      console.log('[MEDIA-SELECTOR] URL:', `${baseUrl}/api/admin/bots/${botSlug}/media`);
+      
+      const headers = getAuthHeaders();
+      
+      if (!headers) {
+        showToast('Token não configurado. Faça login primeiro.', 'error');
+        closeModal('media-selector-modal');
+        return;
+      }
+      
+      console.log('[MEDIA-SELECTOR] Headers:', headers);
+      console.log('[MEDIA-SELECTOR] Token exists:', !!headers.Authorization);
+      
+      const response = await fetch(`${baseUrl}/api/admin/bots/${botSlug}/media`, {
+        headers: headers,
+      });
+      
+      console.log('[MEDIA-SELECTOR] Response status:', response.status);
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        console.error('[MEDIA-SELECTOR] Response error:', errorData);
+        throw new Error(errorData.message || errorData.error || `HTTP ${response.status}`);
+      }
+      
+      const data = await response.json();
+      console.log('[MEDIA-SELECTOR] Data recebido:', data);
+      
+      mediaCache = data.media || [];
+      
+      // Filtrar apenas mídias aquecidas (cache.status = 'ready')
+      const readyMedia = mediaCache.filter(m => m.cache && m.cache.status === 'ready');
+      
+      console.log('[MEDIA-SELECTOR] Total de mídias:', mediaCache.length);
+      console.log('[MEDIA-SELECTOR] Mídias prontas:', readyMedia.length);
+      
+      if (readyMedia.length === 0) {
+        emptyState?.classList.remove('hidden');
+      } else {
+        renderMediaGrid(readyMedia);
+        grid.classList.remove('hidden');
+      }
+    } catch (err) {
+      console.error('[MEDIA-SELECTOR] Erro:', err);
+      showToast('Erro ao carregar mídias: ' + err.message, 'error');
+    } finally {
+      loading?.classList.add('hidden');
+    }
+  }
+  
+  function renderMediaGrid(media) {
+    const grid = document.querySelector('#media-grid');
+    if (!grid) return;
+    
+    grid.innerHTML = media.map(m => {
+      // Construir URL da thumbnail/preview (pode ser via backend ou placeholder)
+      const thumbUrl = m.r2_key ? `${baseUrl}/api/media/preview/${m.id}` : '/placeholder.png';
+      const typeIcon = m.kind === 'video' ? '🎥' : m.kind === 'audio' ? '🎵' : '🖼️';
+      const sizeKB = Math.round((m.bytes || 0) / 1024);
+      const fileName = m.r2_key ? m.r2_key.split('/').pop() : 'Sem nome';
+      const fileId = m.cache?.file_id || '';
+      
+      return `
+        <div class="media-card cursor-pointer hover:ring-2 hover:ring-blue-500 rounded-lg overflow-hidden bg-zinc-800 transition-all"
+             data-media-id="${m.id}"
+             data-file-id="${fileId}"
+             data-media-name="${fileName}"
+             data-media-type="${m.kind}"
+             data-media-size="${sizeKB}"
+             data-media-sha256="${m.sha256}"
+             data-media-r2-key="${m.r2_key}">
+          <div class="relative" style="height: 150px; background: #1a1a2e;">
+            ${m.kind === 'photo' ? `<img src="${thumbUrl}" alt="${fileName}" class="w-full h-full object-cover" onerror="this.style.display='none'" />` : ''}
+            <div class="absolute inset-0 flex items-center justify-center text-6xl">
+              ${typeIcon}
+            </div>
+            <div class="absolute top-2 right-2 bg-black/70 px-2 py-1 rounded text-xs">
+              ${typeIcon} ${m.kind}
+            </div>
+          </div>
+          <div class="p-3">
+            <p class="text-sm font-medium text-white truncate" title="${fileName}">${fileName}</p>
+            <p class="text-xs text-zinc-400 mt-1">${sizeKB} KB • ID: ${m.id}</p>
+          </div>
+        </div>
+      `;
+    }).join('');
+    
+    // Adicionar event listeners nos cards
+    grid.querySelectorAll('.media-card').forEach(card => {
+      card.addEventListener('click', () => {
+        const fileId = card.dataset.fileId;
+        const mediaId = card.dataset.mediaId;
+        const name = card.dataset.mediaName;
+        const type = card.dataset.mediaType;
+        const size = card.dataset.mediaSize;
+        const sha256 = card.dataset.mediaSha256;
+        const r2Key = card.dataset.mediaR2Key;
+        const thumbUrl = card.querySelector('img')?.src || '';
+        
+        selectMedia(fileId, mediaId, name, type, size, sha256, r2Key, thumbUrl);
+        closeModal('media-selector-modal');
+      });
+    });
+  }
+  
+  function selectMedia(fileId, mediaId, name, type, size, sha256, r2Key, thumbUrl) {
+    if (!currentMediaContext) return;
+    
+    const prefix = currentMediaContext === 'start' ? 'start-message' : currentMediaContext;
+    
+    // Preencher hidden inputs
+    const fileIdInput = document.querySelector(`#${prefix}-file-id`);
+    const mediaIdInput = document.querySelector(`#${prefix}-media-id`);
+    const sha256Input = document.querySelector(`#${prefix}-media-sha256`);
+    const r2KeyInput = document.querySelector(`#${prefix}-media-r2-key`);
+    const kindInput = document.querySelector(`#${prefix}-media-kind`);
+    
+    if (fileIdInput) fileIdInput.value = fileId || '';
+    if (mediaIdInput) mediaIdInput.value = mediaId || '';
+    if (sha256Input) sha256Input.value = sha256 || '';
+    if (r2KeyInput) r2KeyInput.value = r2Key || '';
+    if (kindInput) kindInput.value = type || '';
+    
+    // Mostrar preview da mídia selecionada
+    const selectedDiv = document.querySelector(`#${prefix}-selected-media`);
+    const thumb = document.querySelector(`#${prefix}-media-thumb`);
+    const nameEl = document.querySelector(`#${prefix}-media-name`);
+    const infoEl = document.querySelector(`#${prefix}-media-info`);
+    
+    if (selectedDiv) selectedDiv.classList.remove('hidden');
+    if (thumb) thumb.src = thumbUrl;
+    if (nameEl) nameEl.textContent = name;
+    if (infoEl) infoEl.textContent = `${type} • ${size} KB`;
+    
+    showToast('Mídia selecionada: ' + name, 'success');
+  }
+  
+  function clearMediaSelection(context) {
+    const prefix = context === 'start' ? 'start-message' : context;
+    
+    const fileIdInput = document.querySelector(`#${prefix}-file-id`);
+    const selectedDiv = document.querySelector(`#${prefix}-selected-media`);
+    
+    if (fileIdInput) fileIdInput.value = '';
+    if (selectedDiv) selectedDiv.classList.add('hidden');
+    
+    showToast('Mídia removida', 'info');
+  }
+  
+  function filterMediaGrid() {
+    const searchTerm = document.querySelector('#media-search')?.value.toLowerCase() || '';
+    const typeFilter = document.querySelector('#media-type-filter')?.value || '';
+    
+    const filtered = mediaCache.filter(m => {
+      const matchesSearch = !searchTerm || (m.r2_key || '').toLowerCase().includes(searchTerm);
+      const matchesType = !typeFilter || m.kind === typeFilter;
+      const isReady = m.cache && m.cache.status === 'ready';
+      return matchesSearch && matchesType && isReady;
+    });
+    
+    const grid = document.querySelector('#media-grid');
+    const emptyState = document.querySelector('#media-empty-state');
+    
+    if (filtered.length === 0) {
+      grid?.classList.add('hidden');
+      emptyState?.classList.remove('hidden');
+    } else {
+      renderMediaGrid(filtered);
+      grid?.classList.remove('hidden');
+      emptyState?.classList.add('hidden');
+    }
+  }
+  
+  function getCurrentBotSlug() {
+    // Usa o slug armazenado quando abrimos os modais, ou pega da URL
+    if (currentMediaBotSlug) {
+      return currentMediaBotSlug;
+    }
+    return currentAdminSlug();
+  }
+  
+  function setCurrentMediaBotSlug(slug) {
+    currentMediaBotSlug = slug;
+  }
+
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init);
+    document.addEventListener('DOMContentLoaded', () => {
+      init();
+      initMediaSelector();
+    });
   } else {
     init();
+    initMediaSelector();
   }
 })();

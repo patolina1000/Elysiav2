@@ -8,6 +8,7 @@ const dns = require('dns');
 const pino = require('pino');
 const requireAdmin = require('./middleware/requireAdmin');
 const requireTgSecret = require('./middleware/requireTgSecret');
+const { rateLimit, strictRateLimit } = require('./middleware/rateLimit');
 const { createQueue } = require('./lib/inMemoryQueue');
 const { insertStartEvent } = require('./lib/funnel');
 const { recordStartLatency, observe } = require('./lib/metricsService');
@@ -60,6 +61,8 @@ async function getPgPool() {
     maxUses: 1000,
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 5_000,
+    statement_timeout: 30000, // 30s timeout para statements
+    query_timeout: 30000,     // 30s timeout para queries
     ssl: { rejectUnauthorized: false }
   });
   // sanity ping
@@ -236,7 +239,8 @@ app.set('trust proxy', true); // Para ngrok e X-Forwarded-* headers
 const PORT = process.env.PORT || 3000;
 const publicDirectory = path.join(__dirname, 'public');
 
-app.use(express.json());
+// Aumentar limite para suportar uploads de imagens em base64 (50MB)
+app.use(express.json({ limit: '50mb' }));
 
 // Admin UI (arquivos estáticos)
 const adminDirectory = path.join(publicDirectory, 'admin');
@@ -299,11 +303,28 @@ async function processUpdate({ slug, update, request_id, received_at }) {
           const startMessageConfig = await getStartMessage(pgPool, slug);
           
           let messages = [];
+          let hasMedia = false;
+          let mediaInfo = null;
           
           if (startMessageConfig.active && startMessageConfig.message) {
             // Usar mensagem personalizada simples
             console.info('[START][USING_CUSTOM_MESSAGE]', { slug });
             observe('start_config_used_total', 1, { bot: slug, active: true });
+            
+            // Verificar se há mídia configurada
+            if (startMessageConfig.message.media && 
+                startMessageConfig.message.media.file_id && 
+                startMessageConfig.message.media.sha256 && 
+                startMessageConfig.message.media.kind) {
+              hasMedia = true;
+              mediaInfo = startMessageConfig.message.media;
+              console.info('[START][WITH_MEDIA]', { 
+                slug, 
+                kind: mediaInfo.kind,
+                has_file_id: !!mediaInfo.file_id 
+              });
+            }
+            
             messages = [{
               message_type: 'text',
               content: startMessageConfig.message
@@ -329,7 +350,67 @@ async function processUpdate({ slug, update, request_id, received_at }) {
           const sendStart = Date.now();
           let firstMessageSent = false;
           
-          for (let i = 0; i < messages.length; i++) {
+          // Se há mídia, enviar a mídia primeiro com caption
+          if (hasMedia && mediaInfo) {
+            const { sendMediaMessage } = require('./lib/sendService');
+            
+            // Preparar caption (o texto da mensagem)
+            const message = prepareMessageForSend(messages[0]);
+            const caption = message.text || '';
+            
+            try {
+              const mediaResult = await sendMediaMessage(pgPool, {
+                slug,
+                chat_id: messageChatId,
+                media_sha256: mediaInfo.sha256,
+                media_kind: mediaInfo.kind,
+                media_r2_key: mediaInfo.r2_key,
+                caption,
+                parse_mode: message.parse_mode || 'MarkdownV2',
+                raw: message.raw || false,  // Se prepareMessageForSend já escapou, não escapar novamente
+                purpose: 'start',
+                request_id: `start_${request_id}_media`
+              });
+              
+              if (mediaResult.ok) {
+                console.info('[START][MEDIA][OK]', {
+                  slug,
+                  chat_id: messageChatId,
+                  message_id: mediaResult.message_id,
+                  kind: mediaInfo.kind,
+                  lat_ms: mediaResult.lat_ms,
+                  cache_hit: mediaResult.cache_hit
+                });
+                
+                const totalLatency = Date.now() - sendStart;
+                recordStartLatency(slug, totalLatency);
+                observe('start_first_send_latency_ms', totalLatency, { bot: slug });
+                firstMessageSent = true;
+              } else {
+                console.error('[START][MEDIA][ERR]', {
+                  slug,
+                  chat_id: messageChatId,
+                  kind: mediaInfo.kind,
+                  error: mediaResult.error
+                });
+                // Se falhar, enviar só texto como fallback
+                hasMedia = false;
+              }
+            } catch (err) {
+              console.error('[START][MEDIA][EXCEPTION]', {
+                slug,
+                chat_id: messageChatId,
+                error: err.message
+              });
+              // Se falhar, enviar só texto como fallback
+              hasMedia = false;
+            }
+          }
+          
+          // Enviar mensagens de texto (pular a primeira se já enviou como caption da mídia)
+          const startIndex = (hasMedia && firstMessageSent) ? 1 : 0;
+          
+          for (let i = startIndex; i < messages.length; i++) {
             const message = prepareMessageForSend(messages[i]);
             
             const result = await sendTelegramMessage(pgPool, {
@@ -433,6 +514,14 @@ app.post('/tg/:slug/webhook', requireTgSecret, (req, res) => {
   const started = Date.now();
   const request_id = randomUUID();
   const slug = (req.params.slug || '').trim();
+  
+  // Validar formato do slug (proteção contra path traversal)
+  if (!slug || !/^[a-z0-9][a-z0-9_-]{1,63}$/i.test(slug)) {
+    observe('webhook_invalid_slug', 1, { slug });
+    log.warn({ request_id, slug }, '[WEBHOOK][INVALID_SLUG]');
+    return res.status(400).end();
+  }
+  
   const update = req.body;
 
   // ACK IMEDIATO (fast-path) - ANTES de qualquer I/O (sem JSON para ser mais rápido)
@@ -453,8 +542,8 @@ app.post('/tg/:slug/webhook', requireTgSecret, (req, res) => {
   });
 });
 
-// Lista bots (protegido por token Admin)
-app.get('/api/admin/bots', requireAdmin, async (req, res) => {
+// Lista bots (protegido por token Admin + rate limit)
+app.get('/api/admin/bots', rateLimit, requireAdmin, async (req, res) => {
   const request_id = genReqId();
   const publicBase = getPublicBaseUrl(req);
   const pool = await getPgPool();
@@ -512,8 +601,8 @@ app.get('/api/admin/bots', requireAdmin, async (req, res) => {
   }
 });
 
-// Cria bot (protegido por token Admin) + defaults imutáveis
-app.post('/api/admin/bots', requireAdmin, async (req, res) => {
+// Cria bot (protegido por token Admin + strict rate limit) + defaults imutáveis
+app.post('/api/admin/bots', strictRateLimit, requireAdmin, async (req, res) => {
   const request_id = genReqId();
   const { errors, name, slug, provider, use_album, token } = validateBotPayload(req.body || {});
   if (errors.length) {
@@ -617,8 +706,8 @@ app.post('/api/admin/bots', requireAdmin, async (req, res) => {
   }
 });
 
-// Endpoint: Salvar token criptografado de um bot
-app.put('/api/admin/bots/:slug/token', requireAdmin, async (req, res) => {
+// Endpoint: Salvar token criptografado de um bot (strict rate limit - sensível)
+app.put('/api/admin/bots/:slug/token', strictRateLimit, requireAdmin, async (req, res) => {
   const request_id = genReqId();
   const slug = (req.params.slug || '').trim();
   const token = typeof req.body?.token === 'string' ? req.body.token.trim() : '';
@@ -654,8 +743,12 @@ app.put('/api/admin/bots/:slug/token', requireAdmin, async (req, res) => {
         console.warn('[WARMUP][AFTER_TOKEN_SAVE]', { slug, error: err.message });
       });
       
-      // Iniciar heartbeat HTTP para este bot
-      heartbeat.startHttpHeartbeat(slug, token);
+      // Iniciar heartbeat HTTP para este bot (com error handling)
+      try {
+        heartbeat.startHttpHeartbeat(slug, token);
+      } catch (err) {
+        console.error('[HEARTBEAT][START][ERR]', { slug, error: err.message });
+      }
     });
     
     return res.json(result);
@@ -764,8 +857,8 @@ app.get('/api/admin/bots/:slug/token/status', requireAdmin, async (req, res) => 
   }
 });
 
-// Endpoint: Obter detalhes de um bot específico
-app.get('/api/admin/bots/:slug', requireAdmin, async (req, res) => {
+// Endpoint: Obter detalhes de um bot específico (rate limit)
+app.get('/api/admin/bots/:slug', rateLimit, requireAdmin, async (req, res) => {
   const request_id = genReqId();
   const slug = (req.params.slug || '').trim();
   const publicBase = getPublicBaseUrl(req);
@@ -840,8 +933,8 @@ app.get('/api/admin/bots/:slug', requireAdmin, async (req, res) => {
   }
 });
 
-// Endpoint: Deletar bot (soft delete por padrão, hard delete com ?hard=1)
-app.delete('/api/admin/bots/:slug', requireAdmin, async (req, res) => {
+// Endpoint: Deletar bot (soft delete por padrão, hard delete com ?hard=1) (strict rate limit)
+app.delete('/api/admin/bots/:slug', strictRateLimit, requireAdmin, async (req, res) => {
   const request_id = genReqId();
   const slug = (req.params.slug || '').trim();
   const hardDelete = req.query.hard === '1';
@@ -856,26 +949,94 @@ app.delete('/api/admin/bots/:slug', requireAdmin, async (req, res) => {
   try {
     if (pool) {
       if (hardDelete) {
-        // Hard delete - tentar deletar, mas pode falhar se houver referências
+        // Hard delete COMPLETO - remove TODOS os dados do bot
+        console.info('[ADMIN_BOT][DELETE][HARD][START]', { request_id, slug });
+        
+        // Buscar bot_id antes de deletar
+        const botQuery = 'SELECT id FROM public.bots WHERE slug = $1';
+        const botResult = await pool.query(botQuery, [slug]);
+        
+        if (botResult.rowCount === 0) {
+          console.warn('[ADMIN_BOT][DELETE][NOT_FOUND]', { request_id, slug });
+          return res.status(404).json({ ok: false, error: 'BOT_NOT_FOUND' });
+        }
+        
+        const botId = botResult.rows[0].id;
+        const deletedTables = {};
+        
         try {
-          const deleteQuery = 'DELETE FROM public.bots WHERE slug = $1 AND deleted_at IS NOT NULL RETURNING slug';
-          const result = await pool.query(deleteQuery, [slug]);
-
-          if (result.rowCount === 0) {
-            console.warn('[ADMIN_BOT][DELETE][NOT_FOUND_OR_NOT_SOFT_DELETED]', { request_id, slug });
-            return res.status(404).json({ ok: false, error: 'BOT_NOT_FOUND_OR_NOT_SOFT_DELETED' });
+          // 1. Deletar shots_queue
+          const shotsQueueResult = await pool.query('DELETE FROM public.shots_queue WHERE slug = $1', [slug]);
+          deletedTables.shots_queue = shotsQueueResult.rowCount;
+          
+          // 2. Deletar shots
+          const shotsResult = await pool.query('DELETE FROM public.shots WHERE slug = $1', [slug]);
+          deletedTables.shots = shotsResult.rowCount;
+          
+          // 3. Deletar downsells_queue
+          const downsellsQueueResult = await pool.query('DELETE FROM public.downsells_queue WHERE slug = $1', [slug]);
+          deletedTables.downsells_queue = downsellsQueueResult.rowCount;
+          
+          // 4. Deletar bot_downsells
+          const downsellsResult = await pool.query('DELETE FROM public.bot_downsells WHERE slug = $1', [slug]);
+          deletedTables.bot_downsells = downsellsResult.rowCount;
+          
+          // 5. Deletar bot_messages
+          const messagesResult = await pool.query('DELETE FROM public.bot_messages WHERE slug = $1', [slug]);
+          deletedTables.bot_messages = messagesResult.rowCount;
+          
+          // 6. Deletar gateway_events
+          const gatewayResult = await pool.query('DELETE FROM public.gateway_events WHERE slug = $1', [slug]);
+          deletedTables.gateway_events = gatewayResult.rowCount;
+          
+          // 7. Deletar funnel_events (tentar tanto na tabela normal quanto nas partições)
+          try {
+            const funnelResult = await pool.query('DELETE FROM public.funnel_events WHERE bot_slug = $1', [slug]);
+            deletedTables.funnel_events = funnelResult.rowCount;
+          } catch (funnelErr) {
+            console.warn('[ADMIN_BOT][DELETE][HARD][FUNNEL_SKIP]', { request_id, slug, error: funnelErr.message });
+            deletedTables.funnel_events = 0;
           }
-
-          console.info('[ADMIN_BOT][DELETE][HARD][OK]', { request_id, slug });
-          return res.json({ ok: true, deleted: true, hard: true });
+          
+          // 8. Deletar payments relacionados ao bot (se existir a coluna bot_slug ou bot_id)
+          try {
+            const paymentsResult = await pool.query('DELETE FROM public.payments WHERE bot_slug = $1 OR bot_id = $2', [slug, botId]);
+            deletedTables.payments = paymentsResult.rowCount;
+          } catch (paymentsErr) {
+            console.warn('[ADMIN_BOT][DELETE][HARD][PAYMENTS_SKIP]', { request_id, slug, error: paymentsErr.message });
+            deletedTables.payments = 0;
+          }
+          
+          // 9. Finalmente, deletar o próprio bot
+          const botDeleteResult = await pool.query('DELETE FROM public.bots WHERE slug = $1 RETURNING slug, name', [slug]);
+          
+          if (botDeleteResult.rowCount === 0) {
+            console.warn('[ADMIN_BOT][DELETE][HARD][BOT_NOT_DELETED]', { request_id, slug });
+            return res.status(500).json({ ok: false, error: 'BOT_DELETE_FAILED' });
+          }
+          
+          const deletedBot = botDeleteResult.rows[0];
+          
+          console.info('[ADMIN_BOT][DELETE][HARD][OK]', { 
+            request_id, 
+            slug, 
+            bot_name: deletedBot.name,
+            deleted_records: deletedTables 
+          });
+          
+          return res.json({ 
+            ok: true, 
+            deleted: true, 
+            hard: true,
+            bot: deletedBot,
+            deleted_records: deletedTables
+          });
+          
         } catch (err) {
-          // Erro de constraint (foreign key)
-          if (err.code === '23503') {
-            console.warn('[ADMIN_BOT][DELETE][HARD][REFERENCES]', { request_id, slug });
-            return res.status(409).json({ ok: false, error: 'BOT_HAS_REFERENCES' });
-          }
+          console.error('[ADMIN_BOT][DELETE][HARD][ERROR]', { request_id, slug, error: err.message, deleted_so_far: deletedTables });
           throw err;
         }
+        
       } else {
         // Soft delete - marcar deleted_at
         const updateQuery = `
@@ -912,8 +1073,8 @@ app.delete('/api/admin/bots/:slug', requireAdmin, async (req, res) => {
   }
 });
 
-// Endpoint: Enviar mensagem de teste
-app.post('/api/admin/bots/:slug/send-test', requireAdmin, async (req, res) => {
+// Endpoint: Enviar mensagem de teste (strict rate limit)
+app.post('/api/admin/bots/:slug/send-test', strictRateLimit, requireAdmin, async (req, res) => {
   const request_id = genReqId();
   const slug = (req.params.slug || '').trim();
   const { chat_id, text } = req.body || {};
@@ -1539,57 +1700,514 @@ app.post('/api/telegram/validate-token', async (req, res) => {
 });
 
 // ========== WEBHOOKS DE PAGAMENTO (PIX) ==========
-// NOTA: Estes endpoints devem ser integrados com seu gateway de pagamento
-// Exemplo de uso:
-//
-// const paymentWebhookService = require('./lib/paymentWebhookService');
-//
-// // Webhook: PIX criado
-// app.post('/api/payment/webhook/pix-created', async (req, res) => {
-//   res.status(200).json({ ok: true }); // ACK imediato
-//   
-//   setImmediate(async () => {
-//     const pool = await getPgPool();
-//     await paymentWebhookService.handlePixCreated(pool, {
-//       bot_slug: req.body.bot_slug,
-//       telegram_id: req.body.telegram_id,
-//       transaction_id: req.body.transaction_id,
-//       correlation_id: req.body.correlation_id || genReqId()
-//     });
-//   });
-// });
-//
-// // Webhook: Pagamento aprovado
-// app.post('/api/payment/webhook/payment-approved', async (req, res) => {
-//   res.status(200).json({ ok: true }); // ACK imediato
-//   
-//   setImmediate(async () => {
-//     const pool = await getPgPool();
-//     await paymentWebhookService.handlePaymentApproved(pool, {
-//       bot_slug: req.body.bot_slug,
-//       telegram_id: req.body.telegram_id,
-//       transaction_id: req.body.transaction_id
-//     });
-//   });
-// });
-//
-// // Webhook: PIX expirado
-// app.post('/api/payment/webhook/pix-expired', async (req, res) => {
-//   res.status(200).json({ ok: true }); // ACK imediato
-//   
-//   setImmediate(async () => {
-//     const pool = await getPgPool();
-//     await paymentWebhookService.handlePixExpired(pool, {
-//       transaction_id: req.body.transaction_id
-//     });
-//   });
-// });
+// NOTA: Integre estes endpoints com seu gateway de pagamento
+// Eles gerenciam agendamento de downsells e cancelamento ao pagar
+const paymentWebhookService = require('./lib/paymentWebhookService');
+
+// Webhook: PIX criado (agenda downsells com gatilho PIX)
+app.post('/api/payment/webhook/pix-created', async (req, res) => {
+  const started = Date.now();
+  const request_id = genReqId();
+  
+  // ACK IMEDIATO (antes de qualquer I/O)
+  res.status(200).json({ ok: true });
+  
+  // Processar em background
+  setImmediate(async () => {
+    try {
+      const pool = await getPgPool();
+      await paymentWebhookService.handlePixCreated(pool, {
+        bot_slug: req.body.bot_slug,
+        telegram_id: req.body.telegram_id,
+        transaction_id: req.body.transaction_id,
+        correlation_id: req.body.correlation_id || request_id
+      });
+      
+      const done_ms = Date.now() - started;
+      observe('payment_webhook_pix_created_ms', done_ms, { bot: req.body.bot_slug });
+    } catch (err) {
+      console.error('[PAYMENT_WEBHOOK][PIX_CREATED][BG_ERR]', { request_id, error: err.message });
+    }
+  });
+});
+
+// Webhook: Pagamento aprovado (cancela downsells pendentes)
+app.post('/api/payment/webhook/payment-approved', async (req, res) => {
+  const started = Date.now();
+  const request_id = genReqId();
+  
+  // ACK IMEDIATO (antes de qualquer I/O)
+  res.status(200).json({ ok: true });
+  
+  // Processar em background
+  setImmediate(async () => {
+    try {
+      const pool = await getPgPool();
+      await paymentWebhookService.handlePaymentApproved(pool, {
+        bot_slug: req.body.bot_slug,
+        telegram_id: req.body.telegram_id,
+        transaction_id: req.body.transaction_id
+      });
+      
+      const done_ms = Date.now() - started;
+      observe('payment_webhook_approved_ms', done_ms, { bot: req.body.bot_slug });
+    } catch (err) {
+      console.error('[PAYMENT_WEBHOOK][PAYMENT_APPROVED][BG_ERR]', { request_id, error: err.message });
+    }
+  });
+});
+
+// Webhook: PIX expirado (cancela downsells da transação)
+app.post('/api/payment/webhook/pix-expired', async (req, res) => {
+  const started = Date.now();
+  const request_id = genReqId();
+  
+  // ACK IMEDIATO (antes de qualquer I/O)
+  res.status(200).json({ ok: true });
+  
+  // Processar em background
+  setImmediate(async () => {
+    try {
+      const pool = await getPgPool();
+      await paymentWebhookService.handlePixExpired(pool, {
+        transaction_id: req.body.transaction_id
+      });
+      
+      const done_ms = Date.now() - started;
+      observe('payment_webhook_expired_ms', done_ms);
+    } catch (err) {
+      console.error('[PAYMENT_WEBHOOK][PIX_EXPIRED][BG_ERR]', { request_id, error: err.message });
+    }
+  });
+});
 // ========== FIM WEBHOOKS DE PAGAMENTO ==========
+
+// ========== MEDIA MANAGEMENT API ==========
+
+const { saveMedia, listMedia, getMediaById } = require('./lib/mediaService');
+const { isR2Configured } = require('./lib/r2Service');
+const { enqueuePrewarm: enqueueMediaPrewarm, getQueueMetrics: getMediaQueueMetrics } = require('./lib/mediaPrewarmWorker');
+
+// Endpoint: Upload de mídia (POST /api/admin/bots/:slug/media)
+app.post('/api/admin/bots/:slug/media', strictRateLimit, requireAdmin, async (req, res) => {
+  const request_id = genReqId();
+  const slug = (req.params.slug || '').trim();
+  
+  if (!slug) {
+    console.warn('[ADMIN_MEDIA][UPLOAD][INVALID]', { request_id, error: 'MISSING_SLUG' });
+    return res.status(400).json({ ok: false, error: 'MISSING_SLUG' });
+  }
+  
+  // Verificar se R2 está configurado
+  if (!isR2Configured()) {
+    console.warn('[ADMIN_MEDIA][UPLOAD][R2_NOT_CONFIGURED]', { request_id, slug });
+    return res.status(503).json({
+      ok: false,
+      error: 'R2_NOT_CONFIGURED',
+      message: 'R2 storage is not configured. Please set R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, and R2_SECRET_ACCESS_KEY.'
+    });
+  }
+  
+  const pool = await getPgPool();
+  if (!pool) {
+    return res.status(503).json({ ok: false, error: 'DATABASE_NOT_AVAILABLE' });
+  }
+  
+  try {
+    // Espera receber base64 ou multipart (aqui implementamos base64 para simplicidade)
+    const { kind, data_base64, mime, ext, width, height, duration } = req.body;
+    
+    if (!kind || !data_base64) {
+      return res.status(400).json({
+        ok: false,
+        error: 'MISSING_REQUIRED_FIELDS',
+        message: 'kind and data_base64 are required'
+      });
+    }
+    
+    if (!['photo', 'video', 'document', 'audio'].includes(kind)) {
+      return res.status(400).json({
+        ok: false,
+        error: 'INVALID_KIND',
+        message: 'kind must be one of: photo, video, document, audio'
+      });
+    }
+    
+    // Decodificar base64
+    const buffer = Buffer.from(data_base64, 'base64');
+    
+    // Salvar no R2 e registrar no media_store
+    const result = await saveMedia(pool, buffer, slug, kind, {
+      mime,
+      ext,
+      width,
+      height,
+      duration
+    });
+    
+    // Enfileirar para aquecimento
+    enqueueMediaPrewarm({
+      bot_slug: slug,
+      sha256: result.sha256,
+      kind,
+      r2_key: result.r2_key
+    });
+    
+    console.info('[ADMIN_MEDIA][UPLOAD][OK]', {
+      request_id,
+      slug,
+      kind,
+      media_id: result.media_id,
+      sha256: result.sha256,
+      bytes: result.bytes
+    });
+    
+    return res.status(201).json({
+      ok: true,
+      media_id: result.media_id,
+      r2_key: result.r2_key,
+      sha256: result.sha256,
+      bytes: result.bytes,
+      warming: true
+    });
+    
+  } catch (err) {
+    console.error('[ADMIN_MEDIA][UPLOAD][ERR]', {
+      request_id,
+      slug,
+      error: err.message
+    });
+    
+    return res.status(500).json({
+      ok: false,
+      error: 'UPLOAD_FAILED',
+      message: err.message
+    });
+  }
+});
+
+// Endpoint: Listar mídias de um bot (GET /api/admin/bots/:slug/media)
+app.get('/api/admin/bots/:slug/media', rateLimit, requireAdmin, async (req, res) => {
+  const request_id = genReqId();
+  const slug = (req.params.slug || '').trim();
+  const kind = req.query.kind;
+  const limit = parseInt(req.query.limit) || 50;
+  const offset = parseInt(req.query.offset) || 0;
+  
+  if (!slug) {
+    console.warn('[ADMIN_MEDIA][LIST][INVALID]', { request_id, error: 'MISSING_SLUG' });
+    return res.status(400).json({ ok: false, error: 'MISSING_SLUG' });
+  }
+  
+  const pool = await getPgPool();
+  if (!pool) {
+    return res.status(503).json({ ok: false, error: 'DATABASE_NOT_AVAILABLE' });
+  }
+  
+  try {
+    const media = await listMedia(pool, slug, { kind, limit, offset });
+    
+    console.info('[ADMIN_MEDIA][LIST][OK]', {
+      request_id,
+      slug,
+      kind,
+      count: media.length
+    });
+    
+    return res.json({
+      ok: true,
+      media,
+      count: media.length,
+      limit,
+      offset
+    });
+    
+  } catch (err) {
+    console.error('[ADMIN_MEDIA][LIST][ERR]', {
+      request_id,
+      slug,
+      error: err.message
+    });
+    
+    return res.status(500).json({
+      ok: false,
+      error: 'LIST_FAILED',
+      message: err.message
+    });
+  }
+});
+
+// Endpoint: Obter detalhes de uma mídia (GET /api/admin/media/:id)
+app.get('/api/admin/media/:id', rateLimit, requireAdmin, async (req, res) => {
+  const request_id = genReqId();
+  const mediaId = parseInt(req.params.id);
+  
+  if (!mediaId || isNaN(mediaId)) {
+    console.warn('[ADMIN_MEDIA][GET][INVALID]', { request_id, error: 'INVALID_ID' });
+    return res.status(400).json({ ok: false, error: 'INVALID_ID' });
+  }
+  
+  const pool = await getPgPool();
+  if (!pool) {
+    return res.status(503).json({ ok: false, error: 'DATABASE_NOT_AVAILABLE' });
+  }
+  
+  try {
+    const media = await getMediaById(pool, mediaId);
+    
+    if (!media) {
+      console.warn('[ADMIN_MEDIA][GET][NOT_FOUND]', { request_id, mediaId });
+      return res.status(404).json({ ok: false, error: 'MEDIA_NOT_FOUND' });
+    }
+    
+    console.info('[ADMIN_MEDIA][GET][OK]', {
+      request_id,
+      mediaId,
+      bot_slug: media.bot_slug,
+      kind: media.kind
+    });
+    
+    return res.json({
+      ok: true,
+      media
+    });
+    
+  } catch (err) {
+    console.error('[ADMIN_MEDIA][GET][ERR]', {
+      request_id,
+      mediaId,
+      error: err.message
+    });
+    
+    return res.status(500).json({
+      ok: false,
+      error: 'GET_FAILED',
+      message: err.message
+    });
+  }
+});
+
+// Endpoint: Reaquecer mídia (POST /api/admin/media/:id/rewarm)
+app.post('/api/admin/media/:id/rewarm', strictRateLimit, requireAdmin, async (req, res) => {
+  const request_id = genReqId();
+  const mediaId = parseInt(req.params.id);
+  
+  if (!mediaId || isNaN(mediaId)) {
+    console.warn('[ADMIN_MEDIA][REWARM][INVALID]', { request_id, error: 'INVALID_ID' });
+    return res.status(400).json({ ok: false, error: 'INVALID_ID' });
+  }
+  
+  const pool = await getPgPool();
+  if (!pool) {
+    return res.status(503).json({ ok: false, error: 'DATABASE_NOT_AVAILABLE' });
+  }
+  
+  try {
+    const media = await getMediaById(pool, mediaId);
+    
+    if (!media) {
+      console.warn('[ADMIN_MEDIA][REWARM][NOT_FOUND]', { request_id, mediaId });
+      return res.status(404).json({ ok: false, error: 'MEDIA_NOT_FOUND' });
+    }
+    
+    // Enfileirar para aquecimento
+    const enqueued = enqueueMediaPrewarm({
+      bot_slug: media.bot_slug,
+      sha256: media.sha256,
+      kind: media.kind,
+      r2_key: media.r2_key
+    });
+    
+    if (!enqueued) {
+      return res.status(429).json({
+        ok: false,
+        error: 'QUEUE_FULL_OR_DUPLICATE',
+        message: 'Media is already being warmed or queue is full'
+      });
+    }
+    
+    console.info('[ADMIN_MEDIA][REWARM][OK]', {
+      request_id,
+      mediaId,
+      bot_slug: media.bot_slug,
+      sha256: media.sha256
+    });
+    
+    return res.json({
+      ok: true,
+      message: 'Media queued for warming',
+      media_id: mediaId
+    });
+    
+  } catch (err) {
+    console.error('[ADMIN_MEDIA][REWARM][ERR]', {
+      request_id,
+      mediaId,
+      error: err.message
+    });
+    
+    return res.status(500).json({
+      ok: false,
+      error: 'REWARM_FAILED',
+      message: err.message
+    });
+  }
+});
+
+// Endpoint: Atualizar warmup_chat_id de um bot (PUT /api/admin/bots/:slug/warmup-chat)
+app.put('/api/admin/bots/:slug/warmup-chat', strictRateLimit, requireAdmin, async (req, res) => {
+  const request_id = genReqId();
+  const slug = (req.params.slug || '').trim();
+  const warmup_chat_id = req.body.warmup_chat_id;
+  
+  if (!slug) {
+    console.warn('[ADMIN_BOT][WARMUP_CHAT][INVALID]', { request_id, error: 'MISSING_SLUG' });
+    return res.status(400).json({ ok: false, error: 'MISSING_SLUG' });
+  }
+  
+  if (!warmup_chat_id) {
+    console.warn('[ADMIN_BOT][WARMUP_CHAT][INVALID]', { request_id, slug, error: 'MISSING_WARMUP_CHAT_ID' });
+    return res.status(400).json({ ok: false, error: 'MISSING_WARMUP_CHAT_ID' });
+  }
+  
+  const pool = await getPgPool();
+  if (!pool) {
+    return res.status(503).json({ ok: false, error: 'DATABASE_NOT_AVAILABLE' });
+  }
+  
+  try {
+    const query = `
+      UPDATE bots
+      SET warmup_chat_id = $1
+      WHERE slug = $2 AND deleted_at IS NULL
+      RETURNING slug, warmup_chat_id
+    `;
+    
+    const result = await pool.query(query, [warmup_chat_id, slug]);
+    
+    if (result.rowCount === 0) {
+      console.warn('[ADMIN_BOT][WARMUP_CHAT][NOT_FOUND]', { request_id, slug });
+      return res.status(404).json({ ok: false, error: 'BOT_NOT_FOUND' });
+    }
+    
+    console.info('[ADMIN_BOT][WARMUP_CHAT][OK]', {
+      request_id,
+      slug,
+      warmup_chat_id
+    });
+    
+    return res.json({
+      ok: true,
+      slug,
+      warmup_chat_id
+    });
+    
+  } catch (err) {
+    console.error('[ADMIN_BOT][WARMUP_CHAT][ERR]', {
+      request_id,
+      slug,
+      error: err.message
+    });
+    
+    return res.status(500).json({
+      ok: false,
+      error: 'UPDATE_FAILED',
+      message: err.message
+    });
+  }
+});
+
+// Endpoint: Preview de mídia (GET /api/media/preview/:id)
+// Rota pública sem autenticação para permitir <img src> no admin
+app.get('/api/media/preview/:id', async (req, res) => {
+  const mediaId = parseInt(req.params.id);
+  
+  if (!mediaId || isNaN(mediaId)) {
+    return res.status(400).send('Invalid media ID');
+  }
+  
+  const pool = await getPgPool();
+  if (!pool) {
+    return res.status(503).send('Database not available');
+  }
+  
+  try {
+    const media = await getMediaById(pool, mediaId);
+    
+    if (!media) {
+      return res.status(404).send('Media not found');
+    }
+    
+    // Download do R2
+    const { downloadMedia } = require('./lib/r2Service');
+    const buffer = await downloadMedia(media.r2_key);
+    
+    // Set appropriate content type
+    const contentType = media.mime || 'application/octet-stream';
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Cache-Control', 'public, max-age=86400'); // Cache por 1 dia
+    res.setHeader('Content-Length', buffer.length);
+    
+    return res.send(buffer);
+    
+  } catch (err) {
+    console.error('[MEDIA][PREVIEW][ERR]', {
+      mediaId,
+      error: err.message
+    });
+    
+    return res.status(500).send('Failed to load media');
+  }
+});
+
+// Endpoint: Obter métricas da fila de aquecimento (GET /api/admin/media/queue/metrics)
+app.get('/api/admin/media/queue/metrics', rateLimit, requireAdmin, async (req, res) => {
+  const request_id = genReqId();
+  
+  try {
+    const metrics = getMediaQueueMetrics();
+    
+    console.info('[ADMIN_MEDIA][QUEUE_METRICS][OK]', {
+      request_id,
+      ...metrics
+    });
+    
+    return res.json({
+      ok: true,
+      ...metrics
+    });
+    
+  } catch (err) {
+    console.error('[ADMIN_MEDIA][QUEUE_METRICS][ERR]', {
+      request_id,
+      error: err.message
+    });
+    
+    return res.status(500).json({
+      ok: false,
+      error: 'METRICS_FAILED',
+      message: err.message
+    });
+  }
+});
+
+// ========== FIM MEDIA MANAGEMENT API ==========
 
 app.use(express.static(publicDirectory, {
   extensions: ['html'],
   fallthrough: true
 }));
+
+// Servir documentação OpenAPI
+const fs = require('fs');
+app.get('/docs/openapi.yaml', (req, res) => {
+  const yamlPath = path.join(__dirname, 'docs', 'openapi.yaml');
+  if (fs.existsSync(yamlPath)) {
+    res.type('text/yaml').sendFile(yamlPath);
+  } else {
+    res.status(404).send('Documentation not found');
+  }
+});
 
 app.get('/env.js', (req, res) => {
   const base = process.env.APP_BASE_URL || `${forwardedProto(req)}://${forwardedHost(req)}`;
@@ -1613,18 +2231,102 @@ app.use((req, res, next) => {
   }
 });
 
-// ---- Health check para o Render (retorna 200 OK) ----
-// Mantém resposta em texto simples para ser leve e previsível.
-// Adicionar ANTES do app.listen(...)
+// ---- Health checks ----
+
+// Health check simples (para load balancers e monitores externos)
 app.get('/healthz', (_req, res) => {
   res.status(200).type('text/plain').send('ok');
 });
-// Alguns provedores usam HEAD no healthcheck; garanta 200 também:
 app.head('/healthz', (_req, res) => res.sendStatus(200));
+
+// Health check detalhado (retorna métricas e status dos serviços)
+app.get('/health', async (req, res) => {
+  const startTime = Date.now();
+  const health = {
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    uptime: Math.floor(process.uptime()),
+    version: require('./package.json').version,
+    environment: process.env.NODE_ENV || 'development',
+    checks: {}
+  };
+  
+  // Check: Database
+  try {
+    const pool = await getPgPool();
+    if (pool) {
+      const dbStart = Date.now();
+      await pool.query('SELECT 1');
+      const dbLatency = Date.now() - dbStart;
+      health.checks.database = {
+        status: 'ok',
+        latency_ms: dbLatency
+      };
+    } else {
+      health.checks.database = {
+        status: 'unavailable',
+        message: 'Using in-memory storage'
+      };
+    }
+  } catch (err) {
+    health.status = 'degraded';
+    health.checks.database = {
+      status: 'error',
+      message: err.message
+    };
+  }
+  
+  // Check: Memory usage
+  const memUsage = process.memoryUsage();
+  health.checks.memory = {
+    status: 'ok',
+    rss_mb: Math.round(memUsage.rss / 1024 / 1024),
+    heap_used_mb: Math.round(memUsage.heapUsed / 1024 / 1024),
+    heap_total_mb: Math.round(memUsage.heapTotal / 1024 / 1024),
+    external_mb: Math.round(memUsage.external / 1024 / 1024)
+  };
+  
+  // Check: Rate limiters (memory leak prevention)
+  try {
+    const { getStats } = require('./lib/rateLimiterCleanup');
+    const sendService = require('./lib/sendService');
+    // Note: rateLimiters é privado, então não podemos acessá-lo diretamente
+    // Incluir se for exportado futuramente
+    health.checks.rate_limiters = {
+      status: 'ok',
+      message: 'Cleanup active'
+    };
+  } catch (err) {
+    // Ignorar se módulo não estiver disponível
+  }
+  
+  // Check: Queue status
+  try {
+    const queueMetrics = getQueueMetrics();
+    health.checks.queue = {
+      status: 'ok',
+      ...queueMetrics
+    };
+  } catch (err) {
+    // Ignorar se não disponível
+  }
+  
+  // Tempo total de health check
+  health.response_time_ms = Date.now() - startTime;
+  
+  // Determinar status HTTP baseado na saúde
+  const statusCode = health.status === 'ok' ? 200 : 503;
+  
+  res.status(statusCode).json(health);
+});
 
 app.use((req, res) => {
   res.status(404).send('Not Found');
 });
+
+// Iniciar sistema de alerting/monitoramento
+const { startMonitoring } = require('./lib/alerting');
+startMonitoring(getPgPool(), 5); // Check a cada 5 minutos
 
 const HOST = '0.0.0.0';
 app.listen(PORT, HOST, async () => {
@@ -1650,9 +2352,14 @@ app.listen(PORT, HOST, async () => {
       
       // Iniciar workers de downsell e disparo
       downsellWorker.start(pool, 10000); // 10s
-      downsellScheduler.start(pool, queueManager, 3000); // 3s
+      // downsellScheduler.start(pool, queueManager, 3000); // DESABILITADO: risco de duplicação com worker
       shotWorker.start(pool, 5000); // 5s
-      console.info('[BOOT] Workers iniciados: downsell, downsellScheduler, shot');
+      
+      // Iniciar worker de aquecimento de mídia
+      const { startPrewarmWorker } = require('./lib/mediaPrewarmWorker');
+      startPrewarmWorker(pool, 2000); // 2s (processa fila a cada 2s)
+      
+      console.info('[BOOT] Workers iniciados: downsellWorker, shotWorker, mediaPrewarmWorker');
       
       const { rows } = await pool.query(`
         SELECT slug, token_encrypted, token_iv 

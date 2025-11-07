@@ -7,11 +7,16 @@
   "scripts": {
     "build": "echo \"no build\"",
     "start": "node server.js",
+    "test": "jest --verbose",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
     "migrate:only": "node scripts/migrate-only.js",
     "migrate:core": "node scripts/migrate-core.js",
     "migrate:fe:partition": "node scripts/migrate-fe-partition.js",
+    "migrate:010": "node scripts/run-migration-010.js",
     "seed:event": "node scripts/seed-dev-event.js",
-    "tunnel": "ngrok http --region sa 3000"
+    "tunnel": "ngrok http --region sa 3000",
+    "cleanup:deleted": "node scripts/cleanup-deleted-bots.js"
   },
   "dependencies": {
     "dotenv": "^17.2.3",
@@ -19,6 +24,10 @@
     "pg": "^8.11.5",
     "undici": "^7.0.0",
     "pino": "^9.3.2"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "supertest": "^6.3.3"
   },
   "engines": {
     "node": "20.x"

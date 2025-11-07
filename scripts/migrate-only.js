@@ -1,4 +1,5 @@
 /* eslint-disable no-console */
+require('dotenv').config();
 const { Client } = require('pg');
 
 async function run() {

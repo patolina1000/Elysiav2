@@ -1,0 +1,29 @@
+LOG [dotenv@17.2.3] injecting env (21) from .env [2m-- tip: 🛠️  run anywhere with `dotenvx run -- yourcommand`[0m
+INFO [RATE_LIMITER][CLEANUP] Iniciado (intervalo: 5min, idle: 10min)
+INFO [NETWORK] undici global dispatcher configurado
+INFO [ALERTING] Monitoramento iniciado [object Object]
+ERROR [ALERT] {"timestamp":"2025-11-07T00:44:12.887Z","severity":"critical","type":"DATABASE_ERROR","message":"Erro ao conectar com database: pool.query is not a function","metadata":{"error":"pool.query is not a function"},"hostname":"unknown","environment":"development"}
+LOG Servidor ouvindo na porta 3000
+INFO [QUEUE] Iniciado com config: [object Object]
+INFO [HEARTBEAT][PG][START] [object Object]
+INFO [DOWNSELL_WORKER] Iniciando... [object Object]
+INFO [DOWNSELL_WORKER] Iniciado com sucesso
+INFO [SHOT_WORKER] Iniciando... [object Object]
+INFO [SHOT_WORKER] Iniciado com sucesso
+INFO [MEDIA][PREWARM][WORKER][START] [object Object]
+INFO [BOOT] Workers iniciados: downsellWorker, shotWorker, mediaPrewarmWorker
+INFO [PG] conectado.
+INFO [DB][MIGRATION][BOTS] ok (compat token_encrypted)
+INFO [BOOT] Inicializando bots: [object Object]
+INFO [DB][MIGRATION][GATEWAY_EVENTS] ok
+INFO [DOWNSELL_WORKER] Processando lote: [object Object]
+INFO [TOKEN_SERVICE][GET][CACHE_MISS] [object Object]
+INFO [TOKEN_SERVICE][GET][CACHE_MISS] [object Object]
+INFO [HEARTBEAT][HTTP][START] [object Object]
+INFO [TELEGRAM][WARMUP][OK] [object Object]
+INFO [SEND][OK] [object Object]
+INFO [DOWNSELL][SEND][OK] [object Object]
+INFO [TELEGRAM][WARMUP][OK] [object Object]
+INFO [TOKEN_SERVICE][GET][CACHE_HIT] [object Object]
+INFO [SEND][OK] [object Object]
+INFO [DOWNSELL][SEND][OK] [object Object]

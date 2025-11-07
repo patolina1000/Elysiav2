@@ -1,0 +1,466 @@
+openapi: 3.0.3
+info:
+  title: Elysia v2 Admin API
+  description: |
+    API para gerenciamento de bots do Telegram, webhooks, mensagens e monitoramento.
+    
+    ## Autenticação
+    Todas as rotas `/api/admin/*` requerem autenticação via Bearer token no header `Authorization`.
+    
+    ## Rate Limiting
+    - Rotas GET: 100 requests/minuto por IP
+    - Rotas POST/PUT/DELETE sensíveis: 10 requests/5 minutos por IP
+    - Headers informativos: `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`
+    
+    ## Segurança
+    - Tokens criptografados com AES-256-GCM
+    - Webhook secret validation (timing-safe comparison)
+    - Slug validation (previne path traversal)
+    
+  version: 1.0.0
+  contact:
+    name: API Support
+  license:
+    name: Private
+
+servers:
+  - url: http://localhost:3000
+    description: Development
+  - url: https://yourdomain.com
+    description: Production
+
+tags:
+  - name: Bots
+    description: Gerenciamento de bots
+  - name: Tokens
+    description: Gerenciamento de tokens criptografados
+  - name: Webhooks
+    description: Configuração de webhooks do Telegram
+  - name: Messages
+    description: Mensagens e testes de envio
+  - name: Metrics
+    description: Métricas e monitoramento
+  - name: Health
+    description: Health checks
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Token de administrador (ADMIN_API_TOKEN)
+  
+  schemas:
+    Bot:
+      type: object
+      properties:
+        name:
+          type: string
+          example: "My Bot"
+        slug:
+          type: string
+          pattern: '^[a-z0-9][a-z0-9_-]{1,63}$'
+          example: "my-bot"
+        provider:
+          type: string
+          enum: [telegram]
+          example: "telegram"
+        use_album:
+          type: boolean
+          example: false
+        has_token:
+          type: boolean
+          example: true
+        token_updated_at:
+          type: string
+          format: date-time
+        webhook_url:
+          type: string
+          format: uri
+          example: "https://yourdomain.com/tg/my-bot/webhook"
+        created_at:
+          type: string
+          format: date-time
+    
+    Error:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          example: false
+        error:
+          type: string
+          example: "INVALID_PAYLOAD"
+        details:
+          type: array
+          items:
+            type: string
+    
+    RateLimitError:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          example: false
+        error:
+          type: string
+          example: "RATE_LIMIT_EXCEEDED"
+        message:
+          type: string
+          example: "Too many requests. Try again in 45 seconds."
+        retry_after:
+          type: integer
+          example: 45
+
+  responses:
+    Unauthorized:
+      description: Token de autenticação inválido ou ausente
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              ok:
+                type: boolean
+                example: false
+              error:
+                type: string
+                example: "UNAUTHORIZED"
+    
+    RateLimitExceeded:
+      description: Limite de requisições excedido
+      headers:
+        X-RateLimit-Limit:
+          schema:
+            type: integer
+          description: Limite de requisições
+        X-RateLimit-Remaining:
+          schema:
+            type: integer
+          description: Requisições restantes
+        X-RateLimit-Reset:
+          schema:
+            type: string
+            format: date-time
+          description: Momento do reset
+        Retry-After:
+          schema:
+            type: integer
+          description: Segundos para retry
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/RateLimitError'
+
+security:
+  - BearerAuth: []
+
+paths:
+  /healthz:
+    get:
+      tags:
+        - Health
+      summary: Health check simples
+      description: Retorna "ok" em texto plano. Usado por load balancers.
+      security: []
+      responses:
+        '200':
+          description: Sistema saudável
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "ok"
+  
+  /health:
+    get:
+      tags:
+        - Health
+      summary: Health check detalhado
+      description: Retorna métricas detalhadas do sistema
+      security: []
+      responses:
+        '200':
+          description: Sistema saudável
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [ok, degraded]
+                  timestamp:
+                    type: string
+                    format: date-time
+                  uptime:
+                    type: integer
+                    description: Uptime em segundos
+                  version:
+                    type: string
+                  environment:
+                    type: string
+                  checks:
+                    type: object
+                    properties:
+                      database:
+                        type: object
+                        properties:
+                          status:
+                            type: string
+                          latency_ms:
+                            type: integer
+                      memory:
+                        type: object
+                        properties:
+                          status:
+                            type: string
+                          rss_mb:
+                            type: integer
+                          heap_used_mb:
+                            type: integer
+                          heap_total_mb:
+                            type: integer
+                  response_time_ms:
+                    type: integer
+        '503':
+          description: Sistema degradado
+
+  /api/admin/bots:
+    get:
+      tags:
+        - Bots
+      summary: Listar todos os bots
+      description: Lista todos os bots não deletados
+      responses:
+        '200':
+          description: Lista de bots
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Bot'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimitExceeded'
+    
+    post:
+      tags:
+        - Bots
+      summary: Criar novo bot
+      description: Cria um novo bot. Rate limit estrito (10 req/5min).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+                - slug
+              properties:
+                name:
+                  type: string
+                  example: "My Bot"
+                slug:
+                  type: string
+                  pattern: '^[a-z0-9][a-z0-9_-]{1,63}$'
+                  example: "my-bot"
+                provider:
+                  type: string
+                  enum: [telegram]
+                  default: "telegram"
+                use_album:
+                  type: boolean
+                  default: false
+                token:
+                  type: string
+                  description: Token do bot (opcional, pode ser adicionado depois)
+      responses:
+        '201':
+          description: Bot criado com sucesso
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  slug:
+                    type: string
+                  webhook_url:
+                    type: string
+                  bot:
+                    $ref: '#/components/schemas/Bot'
+        '400':
+          description: Payload inválido
+        '409':
+          description: Slug já existe
+        '429':
+          $ref: '#/components/responses/RateLimitExceeded'
+
+  /api/admin/bots/{slug}:
+    parameters:
+      - name: slug
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Slug do bot
+    
+    get:
+      tags:
+        - Bots
+      summary: Obter detalhes do bot
+      responses:
+        '200':
+          description: Detalhes do bot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Bot'
+        '404':
+          description: Bot não encontrado
+        '429':
+          $ref: '#/components/responses/RateLimitExceeded'
+    
+    delete:
+      tags:
+        - Bots
+      summary: Deletar bot
+      description: |
+        Soft delete por padrão. Hard delete com query param `?hard=1`.
+        Rate limit estrito (10 req/5min).
+      parameters:
+        - name: hard
+          in: query
+          schema:
+            type: string
+            enum: ['1']
+          description: Hard delete (remove completamente)
+      responses:
+        '200':
+          description: Bot deletado
+        '404':
+          description: Bot não encontrado
+        '429':
+          $ref: '#/components/responses/RateLimitExceeded'
+
+  /api/admin/bots/{slug}/token:
+    put:
+      tags:
+        - Tokens
+      summary: Salvar token criptografado
+      description: |
+        Salva o token do bot de forma criptografada (AES-256-GCM).
+        Rate limit estrito (10 req/5min).
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - token
+              properties:
+                token:
+                  type: string
+                  example: "123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
+      responses:
+        '200':
+          description: Token salvo com sucesso
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  has_token:
+                    type: boolean
+                  token_masked:
+                    type: string
+                  token_updated_at:
+                    type: string
+                    format: date-time
+        '400':
+          description: Token inválido
+        '429':
+          $ref: '#/components/responses/RateLimitExceeded'
+
+  /api/admin/bots/{slug}/send-test:
+    post:
+      tags:
+        - Messages
+      summary: Enviar mensagem de teste
+      description: |
+        Envia uma mensagem de teste para um chat específico.
+        Rate limit estrito (10 req/5min).
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - chat_id
+                - text
+              properties:
+                chat_id:
+                  type: string
+                  example: "123456789"
+                text:
+                  type: string
+                  example: "Mensagem de teste"
+      responses:
+        '200':
+          description: Mensagem enviada
+        '400':
+          description: Parâmetros inválidos
+        '429':
+          $ref: '#/components/responses/RateLimitExceeded'
+
+  /api/admin/metrics/all:
+    get:
+      tags:
+        - Metrics
+      summary: Obter todas as métricas
+      description: Retorna métricas de envio, latência, queue e heartbeat
+      responses:
+        '200':
+          description: Métricas completas
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  send:
+                    type: object
+                    description: Métricas de envio de mensagens
+                  latency:
+                    type: object
+                    description: Métricas de latência
+                  queue:
+                    type: object
+                    description: Métricas da fila
+                  heartbeat:
+                    type: object
+                    description: Métricas de heartbeat
+        '429':
+          $ref: '#/components/responses/RateLimitExceeded'

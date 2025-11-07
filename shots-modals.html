@@ -1,0 +1,318 @@
+    <!-- ========== MODAIS DE DISPAROS (SHOTS) ========== -->
+    
+    <!-- Modal: Lista de Disparos -->
+    <div id="shots-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="shots-modal-title">
+      <div class="modal-content" style="max-width: 1200px;">
+        <header class="modal-header">
+          <h2 id="shots-modal-title" class="text-lg font-semibold">Gerenciar Disparos</h2>
+          <button class="modal-close" type="button" data-close-modal="shots-modal" aria-label="Fechar">✖️</button>
+        </header>
+        
+        <div class="space-y-4">
+          <!-- Filtros e Busca -->
+          <div class="flex flex-col sm:flex-row gap-3">
+            <input 
+              type="text" 
+              id="shot-search" 
+              placeholder="Buscar por título..." 
+              class="input flex-1"
+            />
+            <select id="shot-status-filter" class="input sm:w-40">
+              <option value="">Todos os status</option>
+              <option value="draft">Draft</option>
+              <option value="scheduled">Agendado</option>
+              <option value="sending">Enviando</option>
+              <option value="done">Concluído</option>
+              <option value="canceled">Cancelado</option>
+            </select>
+            <button class="btn-primary" id="new-shot-btn">+ Novo Disparo</button>
+          </div>
+
+          <!-- Tabela de Disparos -->
+          <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead class="bg-surfaceMuted border-b border-zinc-700">
+                <tr class="text-left text-xs text-zinc-400 uppercase tracking-wider">
+                  <th class="px-4 py-3">ID</th>
+                  <th class="px-4 py-3">Título</th>
+                  <th class="px-4 py-3">Status</th>
+                  <th class="px-4 py-3">Quando</th>
+                  <th class="px-4 py-3">Audiência</th>
+                  <th class="px-4 py-3">Progresso</th>
+                  <th class="px-4 py-3 text-right">Ações</th>
+                </tr>
+              </thead>
+              <tbody id="shots-table-body" class="divide-y divide-zinc-800">
+                <!-- Linhas preenchidas via JS -->
+              </tbody>
+            </table>
+          </div>
+
+          <!-- Placeholder vazio -->
+          <div id="shots-empty-state" class="text-center py-12 text-zinc-500 hidden">
+            <p class="text-lg mb-2">📭 Nenhum disparo encontrado</p>
+            <p class="text-sm">Crie seu primeiro disparo para começar.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Criar/Editar Disparo -->
+    <div id="shot-form-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="shot-form-modal-title">
+      <div class="modal-content" style="max-width: 800px;">
+        <header class="modal-header">
+          <h2 id="shot-form-modal-title" class="text-lg font-semibold">Novo Disparo</h2>
+          <button class="modal-close" type="button" data-close-modal="shot-form-modal" aria-label="Fechar">✖️</button>
+        </header>
+        
+        <form id="shot-form" class="space-y-5">
+          <input type="hidden" id="shot-id" />
+
+          <!-- Título -->
+          <div>
+            <label for="shot-title" class="block text-sm font-medium mb-2">Título *</label>
+            <input 
+              type="text" 
+              id="shot-title" 
+              class="input w-full" 
+              maxlength="120"
+              required 
+              placeholder="Ex: Promoção de Black Friday"
+            />
+            <p class="text-xs text-zinc-500 mt-1"><span id="shot-title-count">0</span>/120 caracteres</p>
+          </div>
+
+          <!-- Mensagem -->
+          <div>
+            <label for="shot-message-text" class="block text-sm font-medium mb-2">Mensagem (MarkdownV2) *</label>
+            <textarea 
+              id="shot-message-text" 
+              class="input w-full h-32 font-mono text-sm" 
+              required
+              placeholder="Digite sua mensagem usando MarkdownV2...&#10;&#10;Exemplos:&#10;**Negrito**&#10;*Itálico*&#10;__Sublinhado__&#10;~Tachado~&#10;[Link](https://example.com)"
+            ></textarea>
+            <p class="text-xs text-zinc-500 mt-1"><span id="shot-message-count">0</span> caracteres</p>
+            <div class="flex gap-2 mt-2">
+              <button type="button" id="shot-preview-btn" class="btn-secondary text-xs px-3 py-1">👁️ Preview</button>
+              <button type="button" id="shot-clear-btn" class="btn-secondary text-xs px-3 py-1">🗑️ Limpar</button>
+            </div>
+          </div>
+
+          <!-- Mídia Opcional -->
+          <div>
+            <label class="block text-sm font-medium mb-2">Mídia (opcional)</label>
+            <div class="flex gap-3">
+              <input 
+                type="text" 
+                id="shot-file-id" 
+                class="input flex-1" 
+                placeholder="file_id da mídia (foto/vídeo)"
+              />
+            </div>
+            <p class="text-xs text-zinc-500 mt-1">Deixe vazio para enviar apenas texto</p>
+          </div>
+
+          <!-- Quando Enviar -->
+          <div>
+            <label class="block text-sm font-medium mb-3">Quando Enviar *</label>
+            <div class="space-y-3">
+              <!-- Enviar Agora -->
+              <label class="flex items-center gap-2 cursor-pointer">
+                <input type="radio" name="shot-trigger" value="now" id="shot-trigger-now" checked class="radio" />
+                <span class="text-sm">⚡ Enviar agora (imediato)</span>
+              </label>
+
+              <!-- Agendar -->
+              <label class="flex items-center gap-2 cursor-pointer">
+                <input type="radio" name="shot-trigger" value="schedule" id="shot-trigger-schedule" class="radio" />
+                <span class="text-sm">📅 Agendar para data/hora específica</span>
+              </label>
+
+              <!-- Campos de Agendamento (ocultos por padrão) -->
+              <div id="shot-schedule-fields" class="pl-6 space-y-3 hidden">
+                <div class="grid grid-cols-2 gap-3">
+                  <div>
+                    <label for="shot-schedule-date" class="block text-xs text-zinc-400 mb-1">Data</label>
+                    <input type="date" id="shot-schedule-date" class="input w-full text-sm" />
+                  </div>
+                  <div>
+                    <label for="shot-schedule-time" class="block text-xs text-zinc-400 mb-1">Hora (múltiplos de 15min)</label>
+                    <select id="shot-schedule-time" class="input w-full text-sm">
+                      <!-- Preenchido via JS com opções de 15 em 15 min -->
+                    </select>
+                  </div>
+                </div>
+                <p class="text-xs text-zinc-500">⏰ Timezone: <span id="shot-timezone-display">-</span></p>
+                <p id="shot-schedule-warning" class="text-xs text-yellow-500 hidden"></p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Audiência (Filtros) -->
+          <div>
+            <label class="block text-sm font-medium mb-3">Audiência (Segmentação)</label>
+            <div class="space-y-2">
+              <label class="flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" id="shot-filter-all-started" checked class="checkbox" />
+                <span class="text-sm">👥 Todos que deram /start</span>
+              </label>
+              <label class="flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" id="shot-filter-has-unpaid-pix" class="checkbox" />
+                <span class="text-sm">💳 Apenas quem tem PIX aberto e não pago</span>
+              </label>
+              <label class="flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" id="shot-filter-exclude-paid" checked class="checkbox" />
+                <span class="text-sm">✅ Excluir quem já pagou</span>
+              </label>
+            </div>
+            <p class="text-xs text-zinc-500 mt-2">
+              A segmentação será aplicada no momento do envio, garantindo dados atualizados.
+            </p>
+          </div>
+
+          <!-- Footer -->
+          <div class="flex flex-col gap-3 sm:flex-row sm:justify-end border-t border-zinc-700 pt-4">
+            <button type="button" class="btn-secondary sm:flex-1" data-close-modal="shot-form-modal">Cancelar</button>
+            <button type="submit" id="shot-save-btn" class="btn-primary sm:flex-1">Salvar</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Modal: Detalhes do Disparo -->
+    <div id="shot-details-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="shot-details-modal-title">
+      <div class="modal-content" style="max-width: 900px;">
+        <header class="modal-header">
+          <h2 id="shot-details-modal-title" class="text-lg font-semibold">Detalhes do Disparo</h2>
+          <button class="modal-close" type="button" data-close-modal="shot-details-modal" aria-label="Fechar">✖️</button>
+        </header>
+        
+        <div class="space-y-5">
+          <!-- Cabeçalho com Info -->
+          <div class="bg-surfaceMuted border border-zinc-700 rounded-lg p-4">
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div>
+                <p class="text-xs text-zinc-500 mb-1">Título</p>
+                <p id="shot-detail-title" class="text-sm font-medium">-</p>
+              </div>
+              <div>
+                <p class="text-xs text-zinc-500 mb-1">Status</p>
+                <p id="shot-detail-status" class="text-sm">-</p>
+              </div>
+              <div>
+                <p class="text-xs text-zinc-500 mb-1">Quando</p>
+                <p id="shot-detail-when" class="text-sm">-</p>
+              </div>
+              <div>
+                <p class="text-xs text-zinc-500 mb-1">Timezone</p>
+                <p id="shot-detail-timezone" class="text-sm text-zinc-400">-</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Contadores (Cards) -->
+          <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
+            <div class="bg-surface border border-zinc-700 rounded-lg p-3 text-center">
+              <p class="text-xs text-zinc-500 mb-1">Fila</p>
+              <p id="shot-detail-queued" class="text-2xl font-bold text-blue-400">0</p>
+            </div>
+            <div class="bg-surface border border-zinc-700 rounded-lg p-3 text-center">
+              <p class="text-xs text-zinc-500 mb-1">Enviados</p>
+              <p id="shot-detail-sent" class="text-2xl font-bold text-green-400">0</p>
+            </div>
+            <div class="bg-surface border border-zinc-700 rounded-lg p-3 text-center">
+              <p class="text-xs text-zinc-500 mb-1">Ignorados</p>
+              <p id="shot-detail-skipped" class="text-2xl font-bold text-yellow-400">0</p>
+            </div>
+            <div class="bg-surface border border-zinc-700 rounded-lg p-3 text-center">
+              <p class="text-xs text-zinc-500 mb-1">Falhas</p>
+              <p id="shot-detail-failed" class="text-2xl font-bold text-red-400">0</p>
+            </div>
+            <div class="bg-surface border border-zinc-700 rounded-lg p-3 text-center">
+              <p class="text-xs text-zinc-500 mb-1">Total</p>
+              <p id="shot-detail-total" class="text-2xl font-bold">0</p>
+            </div>
+          </div>
+
+          <!-- Barra de Progresso -->
+          <div>
+            <div class="flex justify-between text-xs text-zinc-500 mb-1">
+              <span>Progresso</span>
+              <span id="shot-detail-progress-percent">0%</span>
+            </div>
+            <div class="w-full bg-zinc-800 rounded-full h-3">
+              <div id="shot-detail-progress-bar" class="bg-gradient-to-r from-blue-500 to-purple-500 h-3 rounded-full transition-all duration-300" style="width: 0%"></div>
+            </div>
+          </div>
+
+          <!-- Ações -->
+          <div class="flex gap-3 border-t border-zinc-700 pt-4">
+            <button type="button" id="shot-detail-cancel-btn" class="btn-secondary flex-1 hidden">Cancelar Disparo</button>
+            <button type="button" id="shot-detail-duplicate-btn" class="btn-secondary flex-1">📋 Duplicar</button>
+            <button type="button" class="btn-secondary flex-1" data-close-modal="shot-details-modal">Fechar</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Confirmar Cancelamento de Disparo -->
+    <div id="shot-cancel-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="shot-cancel-modal-title">
+      <div class="modal-content">
+        <header class="modal-header">
+          <h2 id="shot-cancel-modal-title" class="text-lg font-semibold">Confirmar Cancelamento</h2>
+          <button class="modal-close" type="button" data-close-modal="shot-cancel-modal" aria-label="Fechar">✖️</button>
+        </header>
+        <div class="space-y-4">
+          <p class="text-sm text-zinc-300">
+            Você está prestes a cancelar o disparo <strong id="cancel-shot-name"></strong>.
+          </p>
+          <p class="text-sm text-zinc-400">
+            Envios pendentes serão marcados como cancelados e não serão mais processados.
+          </p>
+          <div class="flex flex-col gap-3 sm:flex-row sm:justify-end">
+            <button type="button" class="btn-secondary sm:flex-1" data-close-modal="shot-cancel-modal">Voltar</button>
+            <button type="button" id="confirm-shot-cancel-btn" class="btn-primary sm:flex-1 bg-red-600 hover:bg-red-700">Cancelar Disparo</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Confirmar Exclusão de Disparo -->
+    <div id="shot-delete-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="shot-delete-modal-title">
+      <div class="modal-content">
+        <header class="modal-header">
+          <h2 id="shot-delete-modal-title" class="text-lg font-semibold">Confirmar Exclusão</h2>
+          <button class="modal-close" type="button" data-close-modal="shot-delete-modal" aria-label="Fechar">✖️</button>
+        </header>
+        <div class="space-y-4">
+          <p class="text-sm text-zinc-300">
+            Você está prestes a excluir o disparo <strong id="delete-shot-name"></strong>.
+          </p>
+          <p class="text-sm text-zinc-400">
+            Esta ação não pode ser desfeita. Apenas disparos em rascunho ou agendados podem ser excluídos.
+          </p>
+          <div class="flex flex-col gap-3 sm:flex-row sm:justify-end">
+            <button type="button" class="btn-secondary sm:flex-1" data-close-modal="shot-delete-modal">Cancelar</button>
+            <button type="button" id="confirm-shot-delete-btn" class="btn-primary sm:flex-1 bg-red-600 hover:bg-red-700">Excluir</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Prévia do Disparo -->
+    <div id="shot-preview-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="shot-preview-modal-title">
+      <div class="modal-content" style="max-width: 600px;">
+        <header class="modal-header">
+          <h2 id="shot-preview-modal-title" class="text-lg font-semibold">Prévia da Mensagem</h2>
+          <button class="modal-close" type="button" data-close-modal="shot-preview-modal" aria-label="Fechar">✖️</button>
+        </header>
+        <div class="space-y-4">
+          <div class="rounded-xl bg-surface border border-surfaceMuted p-4">
+            <pre id="shot-preview-content" class="text-sm text-zinc-300 whitespace-pre-wrap font-mono"></pre>
+          </div>
+          <div class="flex justify-end">
+            <button type="button" class="btn-secondary" data-close-modal="shot-preview-modal">Fechar</button>
+          </div>
+        </div>
+      </div>
+    </div>
