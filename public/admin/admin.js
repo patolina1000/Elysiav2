@@ -1796,6 +1796,7 @@
     }
 
     // Carregar dados atuais
+    let startMediaRefs = [];
     try {
       const headers = getAuthHeaders();
       if (!headers) {
@@ -1815,58 +1816,31 @@
       const data = await response.json();
       console.log('[START_MESSAGE][DATA]', data);
       
-      // Preencher formulário
-      document.getElementById('start-message-active').checked = data.active || false;
-      document.getElementById('start-message-text').value = data.message?.text || '';
-      document.getElementById('start-message-disable-preview').checked = data.message?.disable_web_page_preview || false;
-      document.getElementById('start-message-raw').checked = data.message?.raw || false;
+      // Armazenar start_media_refs para uso posterior
+      startMediaRefs = data?.start_media_refs || [];
       
-      // Carregar mídia se configurada
-      if (data.message?.media) {
-        const media = data.message.media;
-        document.getElementById('start-message-file-id').value = media.file_id || '';
-        document.getElementById('start-message-media-id').value = media.media_id || '';
-        document.getElementById('start-message-media-sha256').value = media.sha256 || '';
-        document.getElementById('start-message-media-r2-key').value = media.r2_key || '';
-        document.getElementById('start-message-media-kind').value = media.kind || '';
-        
-        // Mostrar preview se houver mídia
-        if (media.file_id && media.kind) {
-          const selectedDiv = document.getElementById('start-message-selected-media');
-          const thumb = document.getElementById('start-message-media-thumb');
-          const nameEl = document.getElementById('start-message-media-name');
-          const infoEl = document.getElementById('start-message-media-info');
-          const mediaType = document.getElementById('start-message-media-type');
-          
-          if (selectedDiv) selectedDiv.classList.remove('hidden');
-          if (thumb && media.media_id) thumb.src = `${baseUrl}/api/media/preview/${media.media_id}`;
-          if (nameEl) nameEl.textContent = media.r2_key ? media.r2_key.split('/').pop() : 'Mídia selecionada';
-          if (infoEl) infoEl.textContent = `${media.kind}`;
-          if (mediaType) {
-            mediaType.value = media.kind;
-            document.getElementById('start-message-media-selector')?.classList.remove('hidden');
-          }
-        }
-      } else {
-        // Limpar campos de mídia se não houver
-        document.getElementById('start-message-file-id').value = '';
-        document.getElementById('start-message-media-id').value = '';
-        document.getElementById('start-message-media-sha256').value = '';
-        document.getElementById('start-message-media-r2-key').value = '';
-        document.getElementById('start-message-media-kind').value = '';
-        document.getElementById('start-message-selected-media')?.classList.add('hidden');
-      }
+      // Preencher formulário
+      const activeEl = document.getElementById('start-message-active');
+      const textEl = document.getElementById('start-message-text');
+      const disablePreviewEl = document.getElementById('start-message-disable-preview');
+      const rawEl = document.getElementById('start-message-raw');
+      
+      if (activeEl) activeEl.checked = data.active || false;
+      if (textEl) textEl.value = data.message?.text || '';
+      if (disablePreviewEl) disablePreviewEl.checked = data.message?.disable_web_page_preview || false;
+      if (rawEl) rawEl.checked = data.message?.raw || false;
       
       // Atualizar contador
       updateCharCount();
       
       // Atualizar data
+      const updatedAtEl = document.getElementById('start-message-updated-at');
       if (data.updated_at) {
         const date = new Date(data.updated_at);
-        document.getElementById('start-message-updated-at').textContent = 
+        if (updatedAtEl) updatedAtEl.textContent = 
           `Última atualização: ${date.toLocaleString('pt-BR')}`;
       } else {
-        document.getElementById('start-message-updated-at').textContent = '';
+        if (updatedAtEl) updatedAtEl.textContent = '';
       }
       
       // Mostrar/ocultar campos baseado no toggle
@@ -1879,24 +1853,44 @@
     
     modal.classList.remove('hidden');
     overlay.classList.remove('hidden');
+    
+    // Montar o componente multi-mídia após o modal estar visível
+    requestAnimationFrame(() => {
+      const container = document.getElementById('start-message-multi-media-container');
+      if (container && typeof MultiMediaSelector !== 'undefined') {
+        // Montar o seletor com as configurações solicitadas
+        window.multiMediaSelector = new MultiMediaSelector(container, {
+          maxItems: 3,
+          allowedKinds: ['audio', 'video', 'photo'],
+          showTypeFilter: true,
+          value: startMediaRefs
+        });
+        
+        console.log('[START_MESSAGE][MULTI_MEDIA] Componente montado com', startMediaRefs.length, 'mídias');
+      } else {
+        console.error('[START_MESSAGE][MULTI_MEDIA] Container ou MultiMediaSelector não encontrado');
+      }
+    });
   }
 
   function toggleStartMessageFields() {
-    const active = document.getElementById('start-message-active').checked;
+    const activeEl = document.getElementById('start-message-active');
     const textField = document.getElementById('start-message-text-field');
     const options = document.getElementById('start-message-options');
     const testSection = document.getElementById('start-message-test-section');
     const saveBtn = document.getElementById('start-message-save-btn');
     const saveCloseBtn = document.getElementById('start-message-save-close-btn');
     
+    const active = activeEl ? activeEl.checked : false;
+    
     if (active) {
-      textField.classList.remove('opacity-50', 'pointer-events-none');
-      options.classList.remove('opacity-50', 'pointer-events-none');
-      testSection.classList.remove('opacity-50', 'pointer-events-none');
+      if (textField) textField.classList.remove('opacity-50', 'pointer-events-none');
+      if (options) options.classList.remove('opacity-50', 'pointer-events-none');
+      if (testSection) testSection.classList.remove('opacity-50', 'pointer-events-none');
     } else {
-      textField.classList.add('opacity-50', 'pointer-events-none');
-      options.classList.add('opacity-50', 'pointer-events-none');
-      testSection.classList.add('opacity-50', 'pointer-events-none');
+      if (textField) textField.classList.add('opacity-50', 'pointer-events-none');
+      if (options) options.classList.add('opacity-50', 'pointer-events-none');
+      if (testSection) testSection.classList.add('opacity-50', 'pointer-events-none');
     }
     
     // Validar botão salvar
@@ -1904,29 +1898,39 @@
   }
 
   function updateCharCount() {
-    const text = document.getElementById('start-message-text').value;
-    document.getElementById('start-message-char-count').textContent = text.length;
+    const textEl = document.getElementById('start-message-text');
+    const charCountEl = document.getElementById('start-message-char-count');
+    
+    if (textEl && charCountEl) {
+      const text = textEl.value;
+      charCountEl.textContent = text.length;
+    }
   }
 
   function validateStartMessageForm() {
-    const active = document.getElementById('start-message-active').checked;
-    const text = document.getElementById('start-message-text').value.trim();
+    const activeEl = document.getElementById('start-message-active');
+    const textEl = document.getElementById('start-message-text');
     const saveBtn = document.getElementById('start-message-save-btn');
     const saveCloseBtn = document.getElementById('start-message-save-close-btn');
     
+    const active = activeEl ? activeEl.checked : false;
+    const text = textEl ? textEl.value.trim() : '';
+    
     const isValid = !active || (text.length > 0 && text.length <= 4096);
     
-    saveBtn.disabled = !isValid;
-    saveCloseBtn.disabled = !isValid;
+    if (saveBtn) saveBtn.disabled = !isValid;
+    if (saveCloseBtn) saveCloseBtn.disabled = !isValid;
   }
 
   function toggleRawWarning() {
-    const raw = document.getElementById('start-message-raw').checked;
+    const rawEl = document.getElementById('start-message-raw');
     const warning = document.getElementById('start-message-raw-warning');
     
-    if (raw) {
+    const raw = rawEl ? rawEl.checked : false;
+    
+    if (raw && warning) {
       warning.classList.remove('hidden');
-    } else {
+    } else if (warning) {
       warning.classList.add('hidden');
     }
   }
@@ -1934,17 +1938,22 @@
   async function saveStartMessage(closeAfter = false) {
     if (!currentStartMessageSlug) return;
     
-    const active = document.getElementById('start-message-active').checked;
-    const text = document.getElementById('start-message-text').value.trim();
-    const disablePreview = document.getElementById('start-message-disable-preview').checked;
-    const raw = document.getElementById('start-message-raw').checked;
+    const activeEl = document.getElementById('start-message-active');
+    const textEl = document.getElementById('start-message-text');
+    const disablePreviewEl = document.getElementById('start-message-disable-preview');
+    const rawEl = document.getElementById('start-message-raw');
     
-    // Dados de mídia (se selecionada)
-    const fileId = document.getElementById('start-message-file-id')?.value || '';
-    const mediaId = document.getElementById('start-message-media-id')?.value || '';
-    const sha256 = document.getElementById('start-message-media-sha256')?.value || '';
-    const r2Key = document.getElementById('start-message-media-r2-key')?.value || '';
-    const kind = document.getElementById('start-message-media-kind')?.value || '';
+    const active = activeEl ? activeEl.checked : false;
+    const text = textEl ? textEl.value.trim() : '';
+    const disablePreview = disablePreviewEl ? disablePreviewEl.checked : false;
+    const raw = rawEl ? rawEl.checked : false;
+    
+    // Obter mídias do multi-media-selector
+    let startMediaRefs = [];
+    if (window.multiMediaSelector && typeof window.multiMediaSelector.getValue === 'function') {
+      startMediaRefs = window.multiMediaSelector.getValue();
+      console.log('[START_MESSAGE][SAVE] Mídias selecionadas:', startMediaRefs.length);
+    }
     
     // Validação
     if (active && !text) {
@@ -1964,20 +1973,10 @@
       raw
     } : null;
     
-    // Adicionar mídia se selecionada
-    if (message && fileId && sha256 && kind && r2Key) {
-      message.media = {
-        file_id: fileId,
-        media_id: mediaId ? parseInt(mediaId) : undefined,
-        sha256,
-        kind,
-        r2_key: r2Key
-      };
-    }
-    
     const payload = {
       active,
-      message
+      message,
+      start_media_refs: startMediaRefs // Incluir as mídias do multi-media-selector
     };
     
     const headers = getAuthHeaders();
@@ -2015,12 +2014,17 @@
   async function testStartMessage() {
     if (!currentStartMessageSlug) return;
     
-    const chatId = document.getElementById('start-message-test-chat-id').value.trim();
-    const text = document.getElementById('start-message-text').value.trim();
-    const disablePreview = document.getElementById('start-message-disable-preview').checked;
-    const raw = document.getElementById('start-message-raw').checked;
+    const chatIdEl = document.getElementById('start-message-test-chat-id');
+    const textEl = document.getElementById('start-message-text');
+    const disablePreviewEl = document.getElementById('start-message-disable-preview');
+    const rawEl = document.getElementById('start-message-raw');
     const resultDiv = document.getElementById('start-message-test-result');
     const testBtn = document.getElementById('start-message-test-btn');
+    
+    const chatId = chatIdEl ? chatIdEl.value.trim() : '';
+    const text = textEl ? textEl.value.trim() : '';
+    const disablePreview = disablePreviewEl ? disablePreviewEl.checked : false;
+    const raw = rawEl ? rawEl.checked : false;
     
     if (!chatId) {
       showToast('error', 'Chat ID obrigatório');
@@ -2396,6 +2400,24 @@
     
     modal.classList.remove('hidden');
     overlay.classList.remove('hidden');
+    
+    // Montar componente multi-mídia após modal estar visível
+    requestAnimationFrame(() => {
+      const container = document.getElementById('downsell-multi-media-container');
+      if (container && typeof MultiMediaSelector !== 'undefined') {
+        // TODO: Carregar downsell_media_refs dos dados do downsell
+        const downsellMediaRefs = []; // Por enquanto vazio, implementar carregamento
+        
+        window.downsellMultiMediaSelector = new MultiMediaSelector(container, {
+          maxItems: 3,
+          allowedKinds: ['audio', 'video', 'photo'],
+          showTypeFilter: true,
+          value: downsellMediaRefs
+        });
+        
+        console.log('[DOWNSELL][MULTI_MEDIA] Componente montado');
+      }
+    });
   }
 
   function updateDownsellFormCounters() {
@@ -3070,6 +3092,24 @@
     
     modal.classList.remove('hidden');
     overlay.classList.remove('hidden');
+    
+    // Montar componente multi-mídia após modal estar visível
+    requestAnimationFrame(() => {
+      const container = document.getElementById('shot-multi-media-container');
+      if (container && typeof MultiMediaSelector !== 'undefined') {
+        // TODO: Carregar shot_media_refs dos dados do shot
+        const shotMediaRefs = []; // Por enquanto vazio, implementar carregamento
+        
+        window.shotMultiMediaSelector = new MultiMediaSelector(container, {
+          maxItems: 3,
+          allowedKinds: ['audio', 'video', 'photo'],
+          showTypeFilter: true,
+          value: shotMediaRefs
+        });
+        
+        console.log('[SHOT][MULTI_MEDIA] Componente montado');
+      }
+    });
   }
 
   /**
@@ -3524,6 +3564,12 @@
       testBtn.addEventListener('click', testStartMessage);
     }
     
+    // Listener para evento customizado do MultiMediaSelector
+    document.addEventListener('openMediaSelector', (e) => {
+      console.log('[MULTI_MEDIA][EVENT] openMediaSelector', e.detail);
+      openMediaSelectorMulti(e.detail);
+    });
+    
     // Event listeners para modal de downsells (elementos fixos no HTML)
     const newDownsellBtn = document.getElementById('new-downsell-btn');
     if (newDownsellBtn) {
@@ -3814,6 +3860,218 @@
     if (typeFilter) {
       typeFilter.addEventListener('change', filterMediaGrid);
     }
+  }
+  
+  async function openMediaSelectorMulti(options) {
+    console.log('[MULTI_MEDIA][OPEN] Abrindo seletor multi-mídia', options);
+    
+    const modal = document.querySelector('#media-selector-modal');
+    const grid = document.querySelector('#media-grid');
+    const loading = document.querySelector('#media-loading');
+    const emptyState = document.querySelector('#media-empty-state');
+    
+    if (!modal || !grid) {
+      console.error('[MULTI_MEDIA][OPEN] Modal ou grid não encontrado');
+      return;
+    }
+    
+    // Armazenar callback e opções
+    window.__multiMediaCallback = options.onMediaSelected;
+    window.__multiMediaOptions = options;
+    
+    // Mostrar modal
+    modal.classList.remove('hidden');
+    document.querySelector('#modal-overlay')?.classList.remove('hidden');
+    loading?.classList.remove('hidden');
+    grid.classList.add('hidden');
+    emptyState?.classList.add('hidden');
+    
+    try {
+      const botSlug = getCurrentBotSlug();
+      if (!botSlug) {
+        showToast('error', 'Nenhum bot selecionado');
+        closeModal('media-selector-modal');
+        return;
+      }
+      
+      const headers = getAuthHeaders();
+      if (!headers) {
+        showToast('error', 'Token não configurado');
+        closeModal('media-selector-modal');
+        return;
+      }
+      
+      const response = await fetch(`${baseUrl}/api/admin/bots/${botSlug}/media`, {
+        headers: headers,
+      });
+      
+      if (!response.ok) {
+        throw new Error('Falha ao carregar mídias');
+      }
+      
+      const data = await response.json();
+      const medias = data.media || [];
+      
+      console.log('[MULTI_MEDIA][LOADED]', medias.length, 'mídias');
+      
+      if (medias.length === 0) {
+        loading?.classList.add('hidden');
+        emptyState?.classList.remove('hidden');
+      } else {
+        loading?.classList.add('hidden');
+        grid.classList.remove('hidden');
+        renderMediaGridMulti(medias, options);
+      }
+    } catch (err) {
+      console.error('[MULTI_MEDIA][ERROR]', err);
+      showToast('error', 'Erro ao carregar mídias');
+      loading?.classList.add('hidden');
+      emptyState?.classList.remove('hidden');
+    }
+  }
+  
+  function renderMediaGridMulti(medias, options) {
+    const grid = document.querySelector('#media-grid');
+    const modal = document.querySelector('#media-selector-modal');
+    if (!grid || !modal) return;
+    
+    const selectedSha256s = new Set((options.selectedItems || []).map(m => m.sha256));
+    const maxItems = options.maxItems || 3;
+    
+    grid.innerHTML = medias.map(m => {
+      const thumbUrl = m.r2_key ? `${baseUrl}/api/media/preview/${m.id}` : '/placeholder.png';
+      const typeIcon = m.kind === 'video' ? '🎥' : m.kind === 'audio' ? '🎵' : '🖼️';
+      const sizeKB = Math.round((m.bytes || 0) / 1024);
+      const fileName = m.r2_key ? m.r2_key.split('/').pop() : 'Sem nome';
+      const isSelected = selectedSha256s.has(m.sha256);
+      
+      return `
+        <div class="media-card cursor-pointer hover:ring-2 hover:ring-blue-500 rounded-lg overflow-hidden bg-zinc-800 transition-all ${isSelected ? 'ring-2 ring-green-500' : ''}"
+             data-media-id="${m.id}"
+             data-media-sha256="${m.sha256}"
+             data-media-kind="${m.kind}"
+             data-media-name="${fileName}"
+             data-media-bytes="${m.bytes || 0}"
+             data-media-r2-key="${m.r2_key}"
+             data-selected="${isSelected}">
+          <div class="relative" style="height: 150px; background: #1a1a2e;">
+            ${m.kind === 'photo' ? `<img src="${thumbUrl}" alt="${fileName}" class="w-full h-full object-cover" onerror="this.style.display='none'" />` : ''}
+            <div class="absolute inset-0 flex items-center justify-center text-6xl">
+              ${typeIcon}
+            </div>
+            <div class="absolute top-2 right-2 bg-black/70 px-2 py-1 rounded text-xs">
+              ${typeIcon} ${m.kind}
+            </div>
+            ${isSelected ? '<div class="absolute top-2 left-2 bg-green-500 text-white px-2 py-1 rounded text-xs">✓ Selecionado</div>' : ''}
+          </div>
+          <div class="p-3">
+            <p class="text-sm font-medium text-white truncate" title="${fileName}">${fileName}</p>
+            <p class="text-xs text-zinc-400 mt-1">${sizeKB} KB • ID: ${m.id}</p>
+          </div>
+        </div>
+      `;
+    }).join('');
+    
+    // Adicionar event listeners nos cards
+    const selectedMedias = [];
+    grid.querySelectorAll('.media-card').forEach(card => {
+      if (card.dataset.selected === 'true') {
+        selectedMedias.push({
+          sha256: card.dataset.mediaSha256,
+          kind: card.dataset.mediaKind,
+          name: card.dataset.mediaName,
+          bytes: parseInt(card.dataset.mediaBytes),
+          r2_key: card.dataset.mediaR2Key,
+          thumb_url: card.querySelector('img')?.src
+        });
+      }
+      
+      card.addEventListener('click', () => {
+        const isSelected = card.dataset.selected === 'true';
+        
+        if (isSelected) {
+          // Desselecionar
+          card.dataset.selected = 'false';
+          card.classList.remove('ring-2', 'ring-green-500');
+          card.querySelector('.absolute.top-2.left-2')?.remove();
+          
+          const index = selectedMedias.findIndex(m => m.sha256 === card.dataset.mediaSha256);
+          if (index > -1) selectedMedias.splice(index, 1);
+        } else {
+          // Verificar limite
+          if (selectedMedias.length >= maxItems) {
+            showToast('warning', `Máximo de ${maxItems} mídias permitido`);
+            return;
+          }
+          
+          // Selecionar
+          card.dataset.selected = 'true';
+          card.classList.add('ring-2', 'ring-green-500');
+          
+          const badge = document.createElement('div');
+          badge.className = 'absolute top-2 left-2 bg-green-500 text-white px-2 py-1 rounded text-xs';
+          badge.textContent = '✓ Selecionado';
+          card.querySelector('.relative').appendChild(badge);
+          
+          selectedMedias.push({
+            sha256: card.dataset.mediaSha256,
+            kind: card.dataset.mediaKind,
+            name: card.dataset.mediaName,
+            bytes: parseInt(card.dataset.mediaBytes),
+            r2_key: card.dataset.mediaR2Key,
+            thumb_url: card.querySelector('img')?.src
+          });
+        }
+        
+        console.log('[MULTI_MEDIA][SELECTED]', selectedMedias.length, 'mídias');
+        updateConfirmButton();
+      });
+    });
+    
+    // Botão de confirmar seleção
+    const modalContent = modal.querySelector('.modal-content');
+    let confirmBtnContainer = modal.querySelector('#confirm-multi-media-container');
+    
+    if (!confirmBtnContainer) {
+      confirmBtnContainer = document.createElement('div');
+      confirmBtnContainer.id = 'confirm-multi-media-container';
+      confirmBtnContainer.className = 'flex justify-end gap-3 mt-4 pt-4 border-t border-zinc-700';
+      
+      const cancelBtn = document.createElement('button');
+      cancelBtn.type = 'button';
+      cancelBtn.className = 'btn-secondary px-6 py-2';
+      cancelBtn.textContent = 'Cancelar';
+      cancelBtn.onclick = () => closeModal('media-selector-modal');
+      
+      const confirmBtn = document.createElement('button');
+      confirmBtn.id = 'confirm-multi-media-btn';
+      confirmBtn.type = 'button';
+      confirmBtn.className = 'btn-primary px-6 py-2';
+      confirmBtn.textContent = 'Confirmar Seleção (0)';
+      
+      confirmBtn.onclick = () => {
+        console.log('[MULTI_MEDIA][CONFIRM]', selectedMedias);
+        if (window.__multiMediaCallback) {
+          window.__multiMediaCallback(selectedMedias);
+        }
+        closeModal('media-selector-modal');
+      };
+      
+      confirmBtnContainer.appendChild(cancelBtn);
+      confirmBtnContainer.appendChild(confirmBtn);
+      modalContent.appendChild(confirmBtnContainer);
+    }
+    
+    // Atualizar contador no botão quando seleção mudar
+    const updateConfirmButton = () => {
+      const confirmBtn = modal.querySelector('#confirm-multi-media-btn');
+      if (confirmBtn) {
+        confirmBtn.textContent = `Confirmar Seleção (${selectedMedias.length})`;
+        confirmBtn.disabled = selectedMedias.length === 0;
+      }
+    };
+    
+    updateConfirmButton();
   }
   
   async function openMediaSelector(context) {

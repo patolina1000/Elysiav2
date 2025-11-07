@@ -439,39 +439,9 @@
             </div>
           </div>
 
-          <!-- Mídia (opcional) -->
+          <!-- Mídias (1-3) -->
           <div class="border-t border-zinc-700 pt-4" id="start-message-media-section">
-            <h3 class="text-sm font-semibold mb-2">Mídia (opcional)</h3>
-            <div class="space-y-3">
-              <div class="form-field">
-                <label for="start-message-media-type" class="form-label">Tipo de mídia</label>
-                <select id="start-message-media-type" class="form-input">
-                  <option value="none">Nenhuma</option>
-                  <option value="photo">Foto</option>
-                  <option value="video">Vídeo</option>
-                </select>
-              </div>
-              <div id="start-message-media-selector" class="hidden">
-                <button type="button" id="start-message-select-media-btn" class="btn-secondary text-xs px-4 py-2">
-                  🎬 Selecionar mídia aquecida
-                </button>
-                <input type="hidden" id="start-message-file-id">
-                <input type="hidden" id="start-message-media-id">
-                <input type="hidden" id="start-message-media-sha256">
-                <input type="hidden" id="start-message-media-r2-key">
-                <input type="hidden" id="start-message-media-kind">
-                <div id="start-message-selected-media" class="hidden mt-3 p-3 bg-zinc-800 rounded-lg">
-                  <div class="flex items-center gap-3">
-                    <img id="start-message-media-thumb" class="w-16 h-16 object-cover rounded" />
-                    <div class="flex-1">
-                      <p class="text-sm font-medium" id="start-message-media-name"></p>
-                      <p class="text-xs text-zinc-500" id="start-message-media-info"></p>
-                    </div>
-                    <button type="button" id="start-message-remove-media" class="text-red-400 hover:text-red-300">✖️</button>
-                  </div>
-                </div>
-              </div>
-            </div>
+            <div id="start-message-multi-media-container"></div>
           </div>
 
           <!-- Teste rápido -->
@@ -644,46 +614,9 @@
             <p class="form-hint hidden text-rose-400" data-error-for="copy"></p>
           </div>
 
-          <!-- Mídia (opcional) -->
+          <!-- Mídias (1-3) -->
           <div class="form-field">
-            <label for="downsell-media-type" class="form-label">Mídia (opcional)</label>
-            <select id="downsell-media-type" class="form-input">
-              <option value="none">Nenhuma</option>
-              <option value="photo">Foto</option>
-              <option value="video">Vídeo</option>
-            </select>
-          </div>
-
-          <div id="downsell-media-fields" class="space-y-3 hidden">
-            <button type="button" id="downsell-select-media-btn" class="btn-secondary text-xs px-4 py-2">
-              🎬 Selecionar mídia aquecida
-            </button>
-            <input type="hidden" id="downsell-file-id">
-            <input type="hidden" id="downsell-media-id">
-            <input type="hidden" id="downsell-media-sha256">
-            <input type="hidden" id="downsell-media-r2-key">
-            <input type="hidden" id="downsell-media-kind">
-            <div id="downsell-selected-media" class="hidden mt-3 p-3 bg-zinc-800 rounded-lg">
-              <div class="flex items-center gap-3">
-                <img id="downsell-media-thumb" class="w-16 h-16 object-cover rounded" />
-                <div class="flex-1">
-                  <p class="text-sm font-medium" id="downsell-media-name"></p>
-                  <p class="text-xs text-zinc-500" id="downsell-media-info"></p>
-                </div>
-                <button type="button" id="downsell-remove-media" class="text-red-400 hover:text-red-300">✖️</button>
-              </div>
-            </div>
-            
-            <div class="form-field">
-              <label for="downsell-caption" class="form-label">Caption (MarkdownV2)</label>
-              <textarea
-                id="downsell-caption"
-                rows="3"
-                maxlength="1024"
-                placeholder="Legenda da mídia..."
-                class="form-input font-mono text-sm"
-              ></textarea>
-            </div>
+            <div id="downsell-multi-media-container"></div>
           </div>
 
           <!-- Gatilhos -->
@@ -702,6 +635,11 @@
             <p class="form-hint hidden text-rose-400" data-error-for="triggers">
               Selecione pelo menos um gatilho
             </p>
+          </div>
+
+          <!-- Mídias (1-3) -->
+          <div class="border-t border-zinc-700 pt-4" id="downsell-media-section">
+            <div id="downsell-multi-media-container"></div>
           </div>
 
           <!-- Delay -->
@@ -1126,6 +1064,11 @@
             </p>
           </div>
 
+          <!-- Mídias (1-3) -->
+          <div class="border-t border-zinc-700 pt-4" id="shot-media-section">
+            <div id="shot-multi-media-container"></div>
+          </div>
+
           <!-- Opções -->
           <div class="form-field">
             <label class="form-label">Opções</label>
@@ -1346,6 +1289,7 @@
       </div>
     </div>
 
+    <script src="multi-media-selector.js"></script>
     <script src="admin.js"></script>
   </body>
 </html>

@@ -304,24 +304,21 @@ async function processUpdate({ slug, update, request_id, received_at }) {
           
           let messages = [];
           let hasMedia = false;
-          let mediaInfo = null;
+          let mediaRefs = [];
           
           if (startMessageConfig.active && startMessageConfig.message) {
             // Usar mensagem personalizada simples
             console.info('[START][USING_CUSTOM_MESSAGE]', { slug });
             observe('start_config_used_total', 1, { bot: slug, active: true });
             
-            // Verificar se há mídia configurada
-            if (startMessageConfig.message.media && 
-                startMessageConfig.message.media.file_id && 
-                startMessageConfig.message.media.sha256 && 
-                startMessageConfig.message.media.kind) {
+            // Verificar se há mídias configuradas (novo sistema)
+            if (startMessageConfig.start_media_refs && startMessageConfig.start_media_refs.length > 0) {
               hasMedia = true;
-              mediaInfo = startMessageConfig.message.media;
-              console.info('[START][WITH_MEDIA]', { 
+              mediaRefs = startMessageConfig.start_media_refs;
+              console.info('[START][WITH_MULTI_MEDIA]', { 
                 slug, 
-                kind: mediaInfo.kind,
-                has_file_id: !!mediaInfo.file_id 
+                media_count: mediaRefs.length,
+                kinds: mediaRefs.map(m => m.kind).join(',')
               });
             }
             
@@ -350,79 +347,58 @@ async function processUpdate({ slug, update, request_id, received_at }) {
           const sendStart = Date.now();
           let firstMessageSent = false;
           
-          // Se há mídia, enviar a mídia primeiro com caption
-          if (hasMedia && mediaInfo) {
-            const { sendMediaMessage } = require('./lib/sendService');
-            
-            // Preparar caption (o texto da mensagem)
-            const message = prepareMessageForSend(messages[0]);
-            const caption = message.text || '';
+          // Se há mídias, enviar as mídias primeiro (separadas, sem caption)
+          if (hasMedia && mediaRefs.length > 0) {
+            const { sendMultipleMedias } = require('./lib/multiMediaSendService');
             
             try {
-              const mediaResult = await sendMediaMessage(pgPool, {
+              const mediaResult = await sendMultipleMedias(pgPool, {
                 slug,
                 chat_id: messageChatId,
-                media_sha256: mediaInfo.sha256,
-                media_kind: mediaInfo.kind,
-                media_r2_key: mediaInfo.r2_key,
-                caption,
-                parse_mode: message.parse_mode || 'MarkdownV2',
-                raw: message.raw || false,  // Se prepareMessageForSend já escapou, não escapar novamente
-                purpose: 'start',
-                request_id: `start_${request_id}_media`
+                media_refs: mediaRefs,
+                purpose: 'start'
               });
               
               if (mediaResult.ok) {
-                console.info('[START][MEDIA][OK]', {
-                  slug,
-                  chat_id: messageChatId,
-                  message_id: mediaResult.message_id,
-                  kind: mediaInfo.kind,
-                  lat_ms: mediaResult.lat_ms,
-                  cache_hit: mediaResult.cache_hit
-                });
-                
-                const totalLatency = Date.now() - sendStart;
-                recordStartLatency(slug, totalLatency);
-                observe('start_first_send_latency_ms', totalLatency, { bot: slug });
                 firstMessageSent = true;
-              } else {
-                console.error('[START][MEDIA][ERR]', {
+                console.info('[START][MULTI_MEDIA_SENT]', {
                   slug,
                   chat_id: messageChatId,
-                  kind: mediaInfo.kind,
-                  error: mediaResult.error
+                  media_count: mediaRefs.length,
+                  success_count: mediaResult.summary.success,
+                  total_ms: mediaResult.total_ms
                 });
-                // Se falhar, enviar só texto como fallback
-                hasMedia = false;
+              } else {
+                console.warn('[START][MULTI_MEDIA_FAILED]', {
+                  slug,
+                  chat_id: messageChatId,
+                  media_count: mediaRefs.length,
+                  errors: mediaResult.summary.errors
+                });
               }
             } catch (err) {
-              console.error('[START][MEDIA][EXCEPTION]', {
+              console.error('[START][MULTI_MEDIA_ERR]', {
                 slug,
                 chat_id: messageChatId,
                 error: err.message
               });
-              // Se falhar, enviar só texto como fallback
-              hasMedia = false;
             }
           }
           
-          // Enviar mensagens de texto (pular a primeira se já enviou como caption da mídia)
-          const startIndex = (hasMedia && firstMessageSent) ? 1 : 0;
-          
-          for (let i = startIndex; i < messages.length; i++) {
+          // Enviar mensagens de texto (após as mídias, se houver)
+          for (let i = 0; i < messages.length; i++) {
             const message = prepareMessageForSend(messages[i]);
             
             const result = await sendTelegramMessage(pgPool, {
               slug,
               chat_id: messageChatId,
-              text: message.text || '',
+              text: message.text,
               parse_mode: message.parse_mode || 'MarkdownV2',
               disable_web_page_preview: message.disable_web_page_preview !== false,
+              raw: message.raw || false,
               purpose: 'start',
               request_id: `start_${request_id}_${i}`,
-              start_session_id: startSessionId,
-              raw: message.raw || false
+              start_session_id: startSessionId
             });
             
             if (result.ok) {
@@ -447,17 +423,24 @@ async function processUpdate({ slug, update, request_id, received_at }) {
               console.error('[START][SEND][ERR]', {
                 slug,
                 chat_id: messageChatId,
-                sequence: i + 1,
                 error: result.error,
-                description: result.description
+                lat_ms: result.lat_ms
               });
             }
-            
-            // Pequeno delay entre mensagens (se houver múltiplas)
-            if (i < messages.length - 1) {
-              await new Promise(resolve => setTimeout(resolve, 300));
-            }
           }
+          
+          // Métricas finais
+          const totalEnqueueLat = Date.now() - enqueueStart;
+          observe('start_enqueue_total_ms', totalEnqueueLat, { bot: slug });
+          
+          console.info('[START][ENQUEUE_COMPLETE]', {
+            request_id,
+            slug,
+            chat_id: messageChatId,
+            total_enqueue_ms: totalEnqueueLat,
+            media_sent: hasMedia ? mediaRefs.length : 0,
+            text_messages: messages.length
+          });
           
           // Agendar downsells ativos após /start (em background)
           setImmediate(async () => {
@@ -1252,7 +1235,7 @@ app.get('/api/admin/bots/:slug/start-message', requireAdmin, async (req, res) =>
 app.put('/api/admin/bots/:slug/start-message', requireAdmin, async (req, res) => {
   const request_id = genReqId();
   const slug = (req.params.slug || '').trim();
-  const { active, message } = req.body || {};
+  const { active, message, start_media_refs } = req.body || {};
 
   if (!slug) {
     return res.status(400).json({ ok: false, error: 'SLUG_REQUIRED' });
@@ -1260,8 +1243,8 @@ app.put('/api/admin/bots/:slug/start-message', requireAdmin, async (req, res) =>
 
   try {
     const pool = await getPgPool();
-    const data = await startMessageService.saveStartMessage(pool, slug, { active, message });
-    console.info('[ADMIN][START_MESSAGE][SAVE]', { request_id, slug, active: data.active });
+    const data = await startMessageService.saveStartMessage(pool, slug, { active, message, start_media_refs });
+    console.info('[ADMIN][START_MESSAGE][SAVE]', { request_id, slug, active: data.active, media_count: start_media_refs?.length || 0 });
     return res.json({ ok: true, ...data });
   } catch (err) {
     console.error('[ADMIN][START_MESSAGE][SAVE][ERR]', { request_id, slug, error: err.message });
@@ -1281,6 +1264,18 @@ app.put('/api/admin/bots/:slug/start-message', requireAdmin, async (req, res) =>
     }
     if (err.message === 'BOT_NOT_FOUND') {
       return res.status(404).json({ ok: false, error: 'BOT_NOT_FOUND' });
+    }
+    if (err.message === 'START_MEDIA_REFS_MUST_BE_ARRAY') {
+      return res.status(400).json({ ok: false, error: 'START_MEDIA_REFS_MUST_BE_ARRAY' });
+    }
+    if (err.message === 'START_MEDIA_REFS_MAX_3') {
+      return res.status(400).json({ ok: false, error: 'START_MEDIA_REFS_MAX_3' });
+    }
+    if (err.message === 'INVALID_MEDIA_SHA256') {
+      return res.status(400).json({ ok: false, error: 'INVALID_MEDIA_SHA256' });
+    }
+    if (err.message === 'INVALID_MEDIA_KIND') {
+      return res.status(400).json({ ok: false, error: 'INVALID_MEDIA_KIND' });
     }
     
     return res.status(500).json({ ok: false, error: err.message });

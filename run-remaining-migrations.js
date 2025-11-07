@@ -16,7 +16,8 @@ async function run() {
     '003_funnel_events_dedup.sql',
     '004_bot_messages.sql',
     '006_shots.sql',
-    '007_bot_start_message.sql'
+    '007_bot_start_message.sql',
+    '014_multi_media_support.sql'
   ];
   
   for (const file of migrations) {
